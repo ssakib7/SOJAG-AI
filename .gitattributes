@@ -1,0 +1,4 @@
+# Keep test fixtures byte-exact: the KB parity test compares against kb_expected.md
+# byte-for-byte, and CRLF conversion on checkout would break it.
+tests/fixtures/* -text
+* text=auto eol=lf
