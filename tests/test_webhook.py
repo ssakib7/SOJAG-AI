@@ -111,4 +111,5 @@ class TestAdmin:
 
     def test_bad_login(self, client):
         res = client.post("/login", data={"username": "admin", "password": "nope"})
-        assert "Wrong username or password" in res.text
+        assert "সঠিক নয়" in res.text  # Bengali error banner, as in the original panel
+        assert "dj_admin" not in res.cookies
