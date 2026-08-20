@@ -99,12 +99,21 @@ async def deliver_due() -> None:
                 )
             ).scalars().all()
 
+        from app.config import get_settings
+
+        shadow = get_settings().shadow_mode
         registry = _sinks()
         for row in rows:
             failed = False
             sinks_state = dict(row.sinks)
             for name, send in registry.get(row.kind, registry["lead"]).items():
                 if sinks_state.get(name) != "pending":
+                    continue
+                if shadow:
+                    # Shadow mode: the ledger row is the record; never double-notify the
+                    # team while the live bot is still handling the same customer.
+                    sinks_state[name] = "skipped"
+                    log.info("Outbox (%s): %s -> %s: skipped (shadow mode)", row.kind, row.id, name)
                     continue
                 try:
                     sent = await send(row.payload)

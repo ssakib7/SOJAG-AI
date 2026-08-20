@@ -56,6 +56,10 @@ class StubHandler(BaseHTTPRequestHandler):
             StubHandler.log.append({"kind": "sheet", "body": body})
             self._json({"ok": True})
             return
+        if "/sendMessage" in self.path:
+            StubHandler.log.append({"kind": "telegram", "body": body})
+            self._json({"ok": True, "result": {}})
+            return
         # Graph send API (messages / sender actions).
         StubHandler.log.append({"kind": "graph", "path": self.path, "body": body})
         self._json({"message_id": "mid.stub"})
@@ -80,11 +84,35 @@ class StubHandler(BaseHTTPRequestHandler):
                                 "function": {"name": name, "arguments": json.dumps(args)}}],
             }, "tool_calls")
 
+        # The payment VERIFIER is a separate structured-output agent: recognise it by
+        # its audit instructions and answer with a validated verdict.
+        flat_text = json.dumps(messages, ensure_ascii=False)
+        if "You audit a sales chatbot" in flat_text:
+            StubHandler.log.append({"kind": "llm", "role": "verifier"})
+            return completion({"role": "assistant",
+                               "content": json.dumps({"is_claim": True, "reason": "Customer stated payment sent."})},
+                              "stop")
+
+        # Scenario detection must look ONLY at the customer's words: the system prompt
+        # itself contains "টাকা পাঠিয়েছি" (in the PAYMENTS instruction block).
+        last_user = next(
+            (m.get("content") for m in reversed(messages)
+             if m.get("role") == "user" and isinstance(m.get("content"), str)),
+            "",
+        )
+        payment_scenario = "টাকা পাঠিয়ে" in last_user or "8N7A2B3C4D" in last_user
+
         if "delegate_task_to_member" in tool_names and not has_tool_result:
             StubHandler.log.append({"kind": "llm", "role": "leader"})
             return tool_call("delegate_task_to_member",
                             {"member_id": "sales", "task": "Handle this sales turn."})
-        if "save_lead" in tool_names and not has_tool_result:
+        if payment_scenario and "report_payment" in tool_names and not has_tool_result:
+            StubHandler.log.append({"kind": "llm", "role": "member-payment-toolcall"})
+            return tool_call("report_payment", {
+                "note": "ভর্তি নিশ্চিত হয়েছে কিনা জানতে চান",
+                "trx_id": "8N7A2B3C4D", "method": "bKash", "amount": "22000",
+            })
+        if not payment_scenario and "save_lead" in tool_names and not has_tool_result:
             StubHandler.log.append({"kind": "llm", "role": "member-toolcall"})
             return tool_call("save_lead", {
                 # The model "mangles" the number (drops a digit) — the pipeline must
@@ -92,7 +120,8 @@ class StubHandler(BaseHTTPRequestHandler):
                 "name": "Orko Rahman", "phone": "0171234567",
                 "interest": "Bar Council কোর্স", "remarks": "দ্রুত ভর্তি হতে চান",
             })
-        StubHandler.log.append({"kind": "llm", "role": "member-final", "has_tool_result": has_tool_result})
+        StubHandler.log.append({"kind": "llm", "role": "member-final", "has_tool_result": has_tool_result,
+                                "tools": tool_names, "payment_scenario": payment_scenario})
         return completion({"role": "assistant",
                            "content": "ধন্যবাদ স্যার! আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করবেন।"}, "stop")
 
@@ -116,6 +145,9 @@ def e2e_client(stub_server, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_BASE", f"{stub_server}/v1")
     monkeypatch.setenv("GOOGLE_SHEET_WEBAPP_URL", f"{stub_server}/sheet")
     monkeypatch.setenv("GRAPH_API_BASE", f"{stub_server}/graph")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "stub-tg-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("TELEGRAM_API_BASE", stub_server)
     monkeypatch.setenv("REPLY_MIN_SECONDS", "0")
     monkeypatch.setenv("REPLY_MAX_SECONDS", "0")
 
@@ -193,3 +225,76 @@ def test_full_lead_capture_flow(e2e_client):
             return len((await db.execute(select(LeadRow))).scalars().all())
 
     assert asyncio.run(_count()) >= 1
+
+
+def _wait_for(predicate, timeout_s: float = 60):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        result = predicate()
+        if result:
+            return result
+        time.sleep(0.25)
+    return predicate()
+
+
+def test_payment_claim_flow(e2e_client):
+    """Customer claims they paid -> sales member calls report_payment -> verifier
+    (structured output) confirms -> reply sent -> claim reaches Telegram."""
+    payload = {"object": "page", "entry": [{"messaging": [{
+        "sender": {"id": "cust-pay-1"},
+        "message": {"mid": "m-e2e-pay-1", "text": "টাকা পাঠিয়ে দিয়েছি। TrxID 8N7A2B3C4D"},
+    }]}]}
+    body = json.dumps(payload).encode()
+    res = e2e_client.post("/webhook", content=body, headers={
+        "content-type": "application/json", "x-hub-signature-256": _sign(body),
+    })
+    assert res.status_code == 200
+
+    # Filter for the claim alert specifically: this boot may first RESUME delivery of a
+    # previous test's still-pending lead notification (the outbox doing its job).
+    telegram_hits = _wait_for(lambda: [
+        e for e in StubHandler.log
+        if e["kind"] == "telegram" and "PAYMENT CLAIM" in e["body"].get("text", "")
+    ])
+    assert telegram_hits, f"payment claim never reached Telegram; log={StubHandler.log}"
+    alert = telegram_hits[0]["body"]["text"]
+    assert "8N7A2B3C4D" in alert
+    assert "Verify before confirming" in alert
+
+    roles = [e["role"] for e in StubHandler.log if e["kind"] == "llm"]
+    assert "member-payment-toolcall" in roles, "report_payment never called"
+    assert "verifier" in roles, "payment verifier never consulted"
+
+    sent_texts = [
+        e["body"].get("message", {}).get("text")
+        for e in StubHandler.log
+        if e["kind"] == "graph" and e["body"].get("message")
+    ]
+    assert sent_texts and "ধন্যবাদ" in sent_texts[-1]
+
+
+def test_sticker_gets_no_reply(e2e_client):
+    """Stickers/👍 are recorded on the roster but never answered."""
+    payload = {"object": "page", "entry": [{"messaging": [{
+        "sender": {"id": "cust-sticker-1"},
+        "message": {"mid": "m-e2e-st-1", "sticker_id": 369239263222822,
+                    "attachments": [{"type": "image", "payload": {"sticker_id": 369239263222822,
+                                                                  "url": "https://cdn/like.png"}}]},
+    }]}]}
+    body = json.dumps(payload).encode()
+    res = e2e_client.post("/webhook", content=body, headers={
+        "content-type": "application/json", "x-hub-signature-256": _sign(body),
+    })
+    assert res.status_code == 200
+
+    time.sleep(3)  # give the pipeline time to (wrongly) reply if it were going to
+    replies = [
+        e for e in StubHandler.log
+        if e["kind"] == "graph" and e["body"].get("message")
+        and e["body"].get("recipient", {}).get("id") == "cust-sticker-1"
+    ]
+    assert not replies, f"sticker was answered: {replies}"
+
+    from app.db import state
+
+    assert state.recents.get("cust-sticker-1", {}).get("last_message") == "(স্টিকার)"

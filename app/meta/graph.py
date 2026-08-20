@@ -43,9 +43,23 @@ async def close_client() -> None:
         _client = None
 
 
+async def _record_shadow(recipient_id: str, kind: str, text: str = "") -> None:
+    from app.db.engine import db_session
+    from app.db.models import ShadowDraftRow
+
+    try:
+        async with db_session() as db:
+            db.add(ShadowDraftRow(sender_id=recipient_id, kind=kind, text=text))
+            await db.commit()
+    except Exception as err:
+        log.error("shadow draft not recorded: %s", err)
+
+
 async def send_action(recipient_id: str, action: str) -> None:
     """Send mark_seen / typing_on / typing_off. Failures are logged, never raised."""
     s = get_settings()
+    if s.shadow_mode:
+        return  # shadow: no outward effect at all for actions
     try:
         res = await client().post(
             f"{s.graph_api_base}/{s.send_target}/messages",
@@ -59,6 +73,10 @@ async def send_action(recipient_id: str, action: str) -> None:
 
 
 async def send_message(recipient_id: str, text: str) -> None:
+    if get_settings().shadow_mode:
+        log.info("[shadow] → [%s] %s", recipient_id, text[:200])
+        await _record_shadow(recipient_id, "message", text)
+        return
     chunks = split_for_messenger(text)
     if len(chunks) > 1:
         log.info("Reply over 2000 chars — sending as %d messages.", len(chunks))

@@ -140,4 +140,17 @@ class ConfigRow(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
 
+class ShadowDraftRow(Base):
+    """Replies the bot WOULD have sent while running in shadow mode, for
+    scripts/shadow_compare.py to diff against the live bot's actual replies."""
+
+    __tablename__ = "shadow_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    sender_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="message")  # message | action
+    text: Mapped[str] = mapped_column(Text, default="")
+
+
 Index("ix_outbox_pending", OutboxRow.done, OutboxRow.not_before)

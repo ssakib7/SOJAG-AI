@@ -142,6 +142,9 @@ def _lead_tools(run_context=None):  # noqa: ANN001
 
 @lru_cache
 def build_team() -> Team:
+    from app.kb.knowledge import get_knowledge
+
+    rag = get_knowledge()  # None unless KNOWLEDGE_RAG_ENABLED (see kb/knowledge.py)
     knowledge = Agent(
         id="knowledge",
         name="KnowledgeAgent",
@@ -151,6 +154,8 @@ def build_team() -> Team:
         ),
         model=build_model(),
         instructions=_member_instructions,
+        knowledge=rag,
+        search_knowledge=rag is not None,
         cache_callables=False,
         telemetry=False,
     )
@@ -182,7 +187,7 @@ def build_team() -> Team:
     )
     return Team(
         name="SojagTeam",
-        model=build_model(),
+        model=build_model(fast=True),  # routing only — no thinking budget, small output
         members=[knowledge, sales, lead],
         mode=TeamMode.route,
         determine_input_for_members=False,  # members see the customer's words unchanged

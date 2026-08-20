@@ -2,7 +2,9 @@ services:
   bot:
     build: .
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false  # secrets can also come from the environment (dev/CI)
     environment:
       DATABASE_URL: postgresql+asyncpg://dejure:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/dejure
     ports:

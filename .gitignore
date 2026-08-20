@@ -10,3 +10,7 @@ __pycache__/
 # Local data
 data/
 *.log
+
+# Local scratch
+.migrate-dryrun.db
+.uvicorn.log

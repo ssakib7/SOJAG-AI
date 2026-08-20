@@ -28,18 +28,26 @@ def _sem() -> asyncio.Semaphore:
     return _semaphore
 
 
-def build_model(model_id: str | None = None) -> Any:
-    """Build the configured Agno model (fresh instance per agent — they are not shared)."""
+def build_model(model_id: str | None = None, *, fast: bool = False) -> Any:
+    """Build the configured Agno model (fresh instance per agent — they are not shared).
+
+    fast=True is for calls where latency beats depth — the team leader's routing hop
+    and other single-decision calls: a small output budget, and on Gemini a zero
+    thinking budget (the 20-40s spike latencies were dominated by thinking tokens on
+    the extra leader hop; routing needs none).
+    """
     s = get_settings()
     mid = model_id or s.llm_model
+    max_tokens = 512 if fast else s.llm_max_tokens
     if s.llm_provider == "openrouter":
         from agno.models.openrouter import OpenRouter
 
         kwargs = {"base_url": s.openrouter_api_base} if s.openrouter_api_base else {}
-        return OpenRouter(id=mid, api_key=s.openrouter_api_key, max_tokens=s.llm_max_tokens, **kwargs)
+        return OpenRouter(id=mid, api_key=s.openrouter_api_key, max_tokens=max_tokens, **kwargs)
     from agno.models.google import Gemini
 
-    return Gemini(id=mid, api_key=s.gemini_api_key, max_output_tokens=s.llm_max_tokens)
+    kwargs = {"thinking_budget": 0} if fast else {}
+    return Gemini(id=mid, api_key=s.gemini_api_key, max_output_tokens=max_tokens, **kwargs)
 
 
 def _is_transient(err: BaseException) -> bool:

@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     reply_max_seconds: int = 10
     memory_enabled: str = ""         # "false" pauses persistence + customer recall
 
+    # --- Knowledge RAG (optional growth path; catalog stays in the prompt) ---
+    knowledge_rag_enabled: bool = False  # needs Postgres + GEMINI_API_KEY (embeddings)
+
     # --- Admin panel (optional restricted editor account) ---
     editor_username: str = ""
     editor_password: str = ""
@@ -70,6 +73,11 @@ class Settings(BaseSettings):
     # --- Infra ---
     database_url: str = "postgresql+asyncpg://dejure:dejure@localhost:5433/dejure"
     port: int = 3000
+    # Shadow mode (pre-cutover quality gate): receive mirrored webhook traffic, run the
+    # full pipeline, but suppress every outward effect — no Graph sends, no sender
+    # actions, and outbox sinks resolve as skipped. Drafts are recorded in
+    # shadow_drafts for scripts/shadow_compare.py to diff against the live bot.
+    shadow_mode: bool = False
 
     # ------------------------------------------------------------------
     @property

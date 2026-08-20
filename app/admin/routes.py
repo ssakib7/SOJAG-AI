@@ -139,6 +139,10 @@ async def kb_save(request: Request) -> Response:
     await kb_config.set_config_value("knowledge_base", merged)
     await kb_config.reload()
     log.info("Knowledge base reloaded from admin edit.")
+
+    from app.kb.knowledge import sync_from_kb
+
+    await sync_from_kb(merged)  # no-op unless KNOWLEDGE_RAG_ENABLED; never fails the save
     return RedirectResponse("/?saved=1", status_code=302)
 
 

@@ -74,6 +74,11 @@ async def lifespan(app: FastAPI):
     await kb_config.reload()
     followups.restore()
 
+    from app.kb.knowledge import knowledge_enabled, sync_from_kb
+
+    if knowledge_enabled():
+        await sync_from_kb(kb_config.current_kb())
+
     stop = asyncio.Event()
     tasks = [
         asyncio.create_task(_flush_loop(stop)),
@@ -83,7 +88,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(digest.run_digest_loop(stop)),
     ]
 
-    log.info("De Jure Academy bot (Agno) listening on port %d", settings.port)
+    log.info("De Jure Academy bot (Agno) started")
     log.info("Lead capture: %s", "enabled" if settings.leads_on else "disabled (no sheet/Telegram configured)")
     log.info("Payment alerts: %s", "enabled (Telegram)" if settings.payments_on else "disabled")
     log.info(
