@@ -1,0 +1,12 @@
+# Secrets — never commit (the old repo's .env-in-worktree mistake stops here)
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local data
+data/
+*.log

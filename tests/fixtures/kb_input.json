@@ -1,0 +1,225 @@
+{
+  "about": "De Jure Academy (ডি জুরি একাডেমি) is a Bangladesh law-education platform founded in **2021**,\r\nbased in **Dhaka**. It prepares students for the **Bangladesh Judicial Service (BJS)** exam and\r\nthe **Bangladesh Bar Council** enrollment (advocate) exam, through **online** and **offline\r\n(campus)** live courses, plus published preparation books.\r\n\r\n- Website: https://dejureacademy.com\r\n- Facebook group: https://www.facebook.com/groups/dejureacademy\r\n- YouTube: https://www.youtube.com/@dejureacademy\r\n- CEO: Walid Rahman · Managing Partner: Adv. Rafiqul Islam\r\n- Mentors include sitting judges/magistrates (e.g. Md. Monirul Islam – Metropolitan Magistrate;\r\n  Rezaul Karim Badhon – Sr. Assistant Judge; Fahima Akther & Rubaiyat Shawon – Assistant Judges).\r\n\r\n### Core values\r\nঅঙ্গীকার (Commitment), মান (Quality), অভিনবত্ব (Innovation), সহযোগিতা (Collaboration),\r\nনৈতিকতা (Integrity), অবিচ্ছিন্ন উন্নয়ন (Continuous Growth).\r\n\r\n### Mission\r\nবাংলাদেশের আইন শিক্ষার্থীদের জন্য একটি আধুনিক, নির্ভরযোগ্য ও উদ্ভাবনী শিক্ষার প্ল্যাটফর্ম তৈরি করা।\r\n\r\n### Vision\r\nবাংলাদেশকে এমন এক প্রজন্মের আইনজীবী, বিচারক ও আইনপেশাজীবী উপহার দেওয়া যারা শুধু পরীক্ষায় নয়,\r\nন্যায়বিচার প্রতিষ্ঠায়ও নেতৃত্ব দেবে।",
+  "contact": {
+    "phone": "",
+    "email": "",
+    "address": "",
+    "officeHours": ""
+  },
+  "courseCategories": [
+    {
+      "name": "BJS (Judicial Service) Exam Preparation",
+      "extraColumns": [],
+      "courses": [
+        {
+          "name": "২০শ BJS সিগনেচার ব্যাচ (20th BJS Signature)",
+          "duration": "~15 mo",
+          "starts": "2026-05-15",
+          "online": {
+            "offer": "22000",
+            "regular": ""
+          },
+          "offline": {
+            "offer": "25000",
+            "regular": ""
+          },
+          "onlineOffline": {
+            "offer": "29000",
+            "regular": ""
+          },
+          "extra": []
+        },
+        {
+          "name": "২০শ BJS Foundation ব্যাচ",
+          "duration": "~12 mo",
+          "starts": "2026-02-24",
+          "online": {
+            "offer": "20000",
+            "regular": "22000"
+          },
+          "offline": {
+            "offer": "25000",
+            "regular": "28000"
+          },
+          "onlineOffline": {
+            "offer": "28000",
+            "regular": "30000"
+          },
+          "extra": []
+        },
+        {
+          "name": "১৯শ BJS MBG (Only Preli)",
+          "duration": "6 mo",
+          "starts": "2026-06-12",
+          "online": {
+            "offer": "18000",
+            "regular": "20000"
+          },
+          "offline": {
+            "offer": "23000",
+            "regular": "25000"
+          },
+          "onlineOffline": {
+            "offer": "27500",
+            "regular": "30000"
+          },
+          "extra": []
+        },
+        {
+          "name": "১৯শ BJS \"অদম্য ১৯\" Exam & Revision",
+          "duration": "6 mo",
+          "starts": "2026-04-15",
+          "online": {
+            "offer": "16000",
+            "regular": "18000"
+          },
+          "offline": {
+            "offer": "20000",
+            "regular": "24500"
+          },
+          "onlineOffline": {
+            "offer": "24500",
+            "regular": "30500"
+          },
+          "extra": []
+        },
+        {
+          "name": "১৯শ BJS Warrior ব্যাচ (Preli+Written)",
+          "duration": "6 mo",
+          "starts": "2026-02-23",
+          "online": {
+            "offer": "16000",
+            "regular": "20500"
+          },
+          "offline": {
+            "offer": "18000",
+            "regular": "22000"
+          },
+          "onlineOffline": {
+            "offer": "26000",
+            "regular": "28000"
+          },
+          "extra": []
+        },
+        {
+          "name": "১৯শ BJS Fearless Dreamer ব্যাচ",
+          "duration": "6 mo",
+          "starts": "2025-11-21",
+          "online": {
+            "offer": "16000",
+            "regular": "20000"
+          },
+          "offline": {
+            "offer": "18000",
+            "regular": "22500"
+          },
+          "onlineOffline": {
+            "offer": "22000",
+            "regular": "26500"
+          },
+          "extra": []
+        },
+        {
+          "name": "১৯শ BJS SIGMA ব্যাচ",
+          "duration": "12 mo",
+          "starts": "2025-09-26",
+          "online": {
+            "offer": "22000",
+            "regular": "26000"
+          },
+          "offline": {
+            "offer": "25000",
+            "regular": "30000"
+          },
+          "onlineOffline": {
+            "offer": "29000",
+            "regular": "32000"
+          },
+          "extra": []
+        }
+      ]
+    },
+    {
+      "name": "Bar Council Exam Preparation",
+      "extraColumns": [],
+      "courses": [
+        {
+          "name": "বার রিটেন ওয়ার্কশপ (Bar Written Workshop)",
+          "duration": "2 mo",
+          "starts": "2026-06-16",
+          "online": {
+            "offer": "11111",
+            "regular": "50000"
+          },
+          "offline": {
+            "offer": "",
+            "regular": ""
+          },
+          "onlineOffline": {
+            "offer": "",
+            "regular": ""
+          },
+          "extra": []
+        },
+        {
+          "name": "বার রিটেন MBG কোর্স",
+          "duration": "2 mo",
+          "starts": "2026-06-16",
+          "online": {
+            "offer": "12000",
+            "regular": "15000"
+          },
+          "offline": {
+            "offer": "22000",
+            "regular": "25000"
+          },
+          "onlineOffline": {
+            "offer": "30000",
+            "regular": "35000"
+          },
+          "extra": []
+        },
+        {
+          "name": "বার প্রিলি ওয়ার্কশপ (Bar Preli Workshop)",
+          "duration": "1 mo",
+          "starts": "2026-05-23",
+          "online": {
+            "offer": "5000",
+            "regular": ""
+          },
+          "offline": {
+            "offer": "",
+            "regular": ""
+          },
+          "onlineOffline": {
+            "offer": "",
+            "regular": ""
+          },
+          "extra": []
+        },
+        {
+          "name": "বার মানিব্যাক Guarantee কোর্স ২০২৬",
+          "duration": "",
+          "starts": "2026-05-18",
+          "online": {
+            "offer": "10000",
+            "regular": "15000"
+          },
+          "offline": {
+            "offer": "19977",
+            "regular": "25000"
+          },
+          "onlineOffline": {
+            "offer": "",
+            "regular": ""
+          },
+          "extra": []
+        }
+      ]
+    }
+  ],
+  "books": "- **Complete BJS Book Set** (10 books): ৳4,500\r\n- **Bar Council Preli Expert Notebook**: ৳850\r\n- **Individual BJS subject books** (৳500 each): Constitutional Law, Criminal Law, Civil Laws,\r\n  Family Laws, Property Laws, Optional Laws, Bangla, English, General Knowledge, Math + Science\r\n- **Free e-books**: Law Student's Survival Guide; আইনের আলোকে ৫০০ প্রেরণাদায়ী উক্তি;\r\n  500 Quotes on Law and Justice; previous-year BJS Q&A sets (Math, Science, GK, English, Bangla)",
+  "enroll": "Enroll through the website https://dejureacademy.com — browse the course, choose the mode\r\n(online / offline / both), and complete payment. For help with enrollment, payment, or batch\r\ndetails, direct the customer to the phone/WhatsApp number above or the Facebook page inbox for a human.",
+  "customSections": [],
+  "answeringRules": "- Answer **only** using facts in this document. If asked something not covered here (exact batch\r\n  schedules beyond those listed, refunds, a customer's individual account/payment status),\r\n  say you'll connect them to a human and share the phone/Facebook page — do not guess.\r\n- **Never invent** prices, dates, guarantees, or course names.\r\n- **Always reply in Bengali (Bangla)**, regardless of the language the customer writes in.\r\n- Keep replies **short, warm, and helpful**. Use ৳ for prices.\r\n- If a price has both a regular and offer price, mention the current offer price first."
+}
