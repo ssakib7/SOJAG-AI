@@ -60,12 +60,20 @@ def accounts() -> list[dict[str, str]]:
 
 
 def check_login(username: str, password: str) -> dict[str, str] | None:
+    """Constant-time credential check. Values are compared as UTF-8 bytes:
+    hmac.compare_digest rejects non-ASCII str outright (TypeError), which would turn a
+    password containing any non-ASCII character into a 500 instead of a failed login."""
+    supplied_user = username.strip().encode("utf-8")
+    supplied_pass = password.encode("utf-8")
+    match = None
     for account in accounts():
-        if hmac.compare_digest(username, account["username"]) and hmac.compare_digest(
-            password, account["password"]
-        ):
-            return account
-    return None
+        # No early exit: every account is compared so timing does not reveal which
+        # username exists.
+        user_ok = hmac.compare_digest(supplied_user, account["username"].strip().encode("utf-8"))
+        pass_ok = hmac.compare_digest(supplied_pass, account["password"].encode("utf-8"))
+        if user_ok and pass_ok:
+            match = account
+    return match
 
 
 def current_session(request: Request) -> tuple[dict[str, Any] | None, str | None]:

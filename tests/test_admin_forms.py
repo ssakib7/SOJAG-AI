@@ -143,3 +143,52 @@ def test_prompt_sections_from_form():
 def test_malformed_bodies_do_not_crash(payload):
     kb = form_to_kb(payload)
     assert kb["courseCategories"] == [] and kb["customSections"] == []
+
+
+class TestLoginCredentials:
+    """Credential checks must survive real-world passwords (symbols, non-ASCII)."""
+
+    def _accounts(self, monkeypatch, admin_pw, editor=None):
+        from app.admin import auth
+        from app.config import get_settings
+
+        monkeypatch.setenv("ADMIN_USERNAME", "admin")
+        monkeypatch.setenv("ADMIN_PASSWORD", admin_pw)
+        if editor:
+            monkeypatch.setenv("EDITOR_USERNAME", editor[0])
+            monkeypatch.setenv("EDITOR_PASSWORD", editor[1])
+        get_settings.cache_clear()
+        yield_auth = auth
+        return yield_auth
+
+    def test_symbols_in_password(self, monkeypatch):
+        auth = self._accounts(monkeypatch, "sakib@swapnil")
+        try:
+            assert auth.check_login("admin", "sakib@swapnil")["role"] == "admin"
+            assert auth.check_login("admin", "wrong") is None
+        finally:
+            from app.config import get_settings
+
+            get_settings.cache_clear()
+
+    def test_non_ascii_password_does_not_crash(self, monkeypatch):
+        auth = self._accounts(monkeypatch, "পাসওয়ার্ড১২৩")
+        try:
+            assert auth.check_login("admin", "পাসওয়ার্ড১২৩") is not None
+            assert auth.check_login("admin", "nope") is None
+        finally:
+            from app.config import get_settings
+
+            get_settings.cache_clear()
+
+    def test_editor_account_and_username_trimmed(self, monkeypatch):
+        auth = self._accounts(monkeypatch, "adminpw", editor=("Tuhin", "tuhin@12345"))
+        try:
+            assert auth.check_login("Tuhin", "tuhin@12345")["role"] == "editor"
+            assert auth.check_login("  Tuhin  ", "tuhin@12345")["role"] == "editor"
+            assert auth.check_login("tuhin", "tuhin@12345") is None  # case-sensitive
+            assert auth.check_login("Tuhin", "adminpw") is None      # no cross-account mixing
+        finally:
+            from app.config import get_settings
+
+            get_settings.cache_clear()
