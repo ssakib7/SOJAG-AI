@@ -124,6 +124,32 @@ def create_app() -> FastAPI:
     from app.admin.routes import router as admin_router
 
     app.include_router(admin_router)
+    return _mount_agentos(app)
+
+
+def _mount_agentos(app: FastAPI) -> FastAPI:
+    """Optionally mount Agno's AgentOS (control plane: runs, traces, sessions) as a
+    SUB-application under /os. Only when AGENTOS_ENABLED and OS_SECURITY_KEY are both
+    set: AgentOS adds its own API, and on a public domain that must be bearer-protected.
+    It is mounted rather than wrapped (base_app) on purpose — wrapping applies AgentOS's
+    auth middleware to every route, which would lock out Meta's webhook and the admin
+    panel. Point the control-plane UI at https://<host>/os."""
+    settings = get_settings()
+    if not settings.agentos_enabled:
+        return app
+    if not settings.os_security_key:
+        log.error("AGENTOS_ENABLED is set but OS_SECURITY_KEY is empty — AgentOS NOT mounted.")
+        return app
+    import os
+
+    os.environ.setdefault("OS_SECURITY_KEY", settings.os_security_key)
+    from agno.os import AgentOS
+
+    from app.agents.factory import build_team
+
+    agent_os = AgentOS(id="dejure-agent", name="De Jure Agent", teams=[build_team()], telemetry=False)
+    app.mount("/os", agent_os.get_app())
+    log.info("AgentOS control plane mounted at /os (bearer-protected).")
     return app
 
 

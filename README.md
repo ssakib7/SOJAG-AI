@@ -48,6 +48,17 @@ uv run python scripts/migrate_json.py e:/dejure-fb-bot
 Idempotent; `leads.jsonl` is the ledger of record. Undelivered outbox items resume
 delivery on the next boot.
 
+## Optional features (env flags, all off by default)
+
+| Flag | What it does |
+|---|---|
+| `SHADOW_MODE=true` | Pre-cutover gate: full pipeline on mirrored webhook traffic, zero outward effects; drafts land in `shadow_drafts`. Diff against the live bot with `scripts/shadow_compare.py old-bot.log report.md`. |
+| `KNOWLEDGE_RAG_ENABLED=true` | Agentic RAG over books/custom sections via Agno Knowledge + pgvector (hybrid search). The course catalog always stays in the prompt. Needs Postgres + `GEMINI_API_KEY`. |
+| `AGENTOS_ENABLED=true` + `OS_SECURITY_KEY` | Mounts Agno's AgentOS control plane at `/os` (bearer-protected; the rest of the app is untouched). Point the AgentOS UI at `https://<host>/os`. |
+
+`scripts/live_spike.py` runs a scripted Bengali conversation against the real model (phase-0
+check); `scripts/latency_probe.py` isolates bare vs member vs team latency.
+
 ## Notes
 
 - The Agno team runs with `add_history_to_context=False`: committed history is

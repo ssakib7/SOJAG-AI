@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # --- Knowledge RAG (optional growth path; catalog stays in the prompt) ---
     knowledge_rag_enabled: bool = False  # needs Postgres + GEMINI_API_KEY (embeddings)
 
+    # --- AgentOS control plane (optional, post-cutover observability) ---
+    # Mounts Agno's AgentOS API on top of our FastAPI app (traces, sessions, runs).
+    # Refused unless OS_SECURITY_KEY is set: its routes would otherwise be public.
+    agentos_enabled: bool = False
+    os_security_key: str = ""
+
     # --- Admin panel (optional restricted editor account) ---
     editor_username: str = ""
     editor_password: str = ""
