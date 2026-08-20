@@ -17,7 +17,22 @@ def _write(path, obj):
     path.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
 
 
-def test_migrate_old_shapes(tmp_path):
+def test_migrate_old_shapes(tmp_path, monkeypatch):
+    # Own database: the migrated outbox row (pending, epoch ~1970) would otherwise make
+    # /health report "stuck" in other tests sharing the session-wide SQLite file.
+    from app.config import get_settings
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'migrate.db').as_posix()}")
+    get_settings.cache_clear()
+    reset_engine_for_tests()
+    try:
+        _run_migration_case(tmp_path)
+    finally:
+        get_settings.cache_clear()
+        reset_engine_for_tests()
+
+
+def _run_migration_case(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
     _write(tmp_path / "knowledge_base.json", {
