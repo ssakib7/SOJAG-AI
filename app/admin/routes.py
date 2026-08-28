@@ -85,6 +85,12 @@ def _fmt_when(value: object) -> str:
     return dt.strftime("%d %b %Y, %H:%M") if dt else "—"
 
 
+def _nl(value: object) -> str:
+    """Textarea text with browser CRLF line endings folded back to plain \n, so a
+    value can be compared byte-for-byte against a built-in default."""
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _snippet(s: object, max_len: int = 70) -> str:
     text = " ".join(str(s or "").split())
     return text[: max_len - 1] + "…" if len(text) > max_len else text
@@ -266,16 +272,19 @@ async def prompt_save(request: Request) -> Response:
         turns = 0
 
     # A value identical to the built-in default is stored blank, so future default
-    # improvements reach panels that never customised it (old-bot behaviour).
-    sp = str(body.get("systemPrompt") or "")
-    ar = str(body.get("answeringRules") or "")
+    # improvements reach panels that never customised it (old-bot behaviour). The boxes
+    # are pre-filled with the default, so this is the normal path, not a rare one --
+    # hence _nl(): browsers submit textareas with CRLF, which would never match.
+    sp = _nl(body.get("systemPrompt"))
+    ar = _nl(body.get("answeringRules"))
     await kb_config.set_config_value(
         "system_prompt", {"text": "" if sp.strip() == defaults.DEFAULT_SYSTEM_PROMPT.strip() else sp})
     await kb_config.set_config_value(
         "answering_rules", {"text": "" if ar.strip() == defaults.DEFAULT_ANSWERING_RULES.strip() else ar})
     await kb_config.set_config_value("prompt_sections", {"sections": prompt_sections_from_form(body)})
+    li = _nl(body.get("leadInstruction")).strip()
     await kb_config.set_config_value("lead_capture", {
-        "instruction": str(body.get("leadInstruction") or "").strip(),
+        "instruction": "" if li == defaults.DEFAULT_LEAD_INSTRUCTION.strip() else li,
         "askAfterTurns": turns if turns > 0 else defaults.DEFAULT_ASK_AFTER_TURNS,
     })
     await kb_config.reload()

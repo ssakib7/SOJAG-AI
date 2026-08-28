@@ -508,14 +508,14 @@ PROMPT = """{% extends "shell" %}{% block content %}
 
 <section class="card" id="sec-prompt">
   <h2>System prompt</h2>
-  <p class="hint">The core instructions sent to the AI on every message. The knowledge base is appended automatically, so don't paste facts here. Leave blank to restore the built-in default (shown as the placeholder).</p>
-  <textarea id="systemPrompt" name="systemPrompt" class="prompt-input" placeholder="{{ default_prompt }}">{{ system_prompt }}</textarea>
+  <p class="hint">The core instructions sent to the AI on every message. The knowledge base is appended automatically, so don't paste facts here. The box starts out holding the built-in default — edit it freely. Clear it to go back to the default.</p>
+  <textarea id="systemPrompt" name="systemPrompt" class="prompt-input" placeholder="{{ default_prompt }}">{{ system_prompt or default_prompt }}</textarea>
 </section>
 
 <section class="card" id="sec-rules">
   <h2>Answering rules</h2>
-  <p class="hint">Do's and don'ts the bot always follows (e.g. never invent prices, always reply in Bengali). Added to the prompt as instructions. Markdown. Leave blank to restore the default (shown as placeholder).</p>
-  <textarea id="answeringRules" name="answeringRules" placeholder="{{ default_rules }}">{{ answering_rules }}</textarea>
+  <p class="hint">Do's and don'ts the bot always follows (e.g. never invent prices, always reply in Bengali). Added to the prompt as instructions. Markdown. The box starts out holding the built-in default — edit it freely. Clear it to go back to the default.</p>
+  <textarea id="answeringRules" name="answeringRules" placeholder="{{ default_rules }}">{{ answering_rules or default_rules }}</textarea>
 </section>
 
 <div id="sec-scenarios">
@@ -541,9 +541,9 @@ PROMPT = """{% extends "shell" %}{% block content %}
 
 <section class="card" id="sec-lead">
   <h2>Lead capture</h2>
-  <p class="hint">How and when the bot collects a customer's contact details. It asks them to send their name + phone, then a <code>save_lead</code> tool saves it to your Sheet/Telegram (the phone is validated in code). The bot also writes a short note on what the customer is interested in and how to handle them, and sends it along with the lead. Only used when lead capture is configured. Leave the instruction blank to restore the default (shown as placeholder).</p>
+  <p class="hint">How and when the bot collects a customer's contact details. It asks them to send their name + phone, then a <code>save_lead</code> tool saves it to your Sheet/Telegram (the phone is validated in code). The bot also writes a short note on what the customer is interested in and how to handle them, and sends it along with the lead. Only used when lead capture is configured. The box starts out holding the built-in default — edit it freely. Clear it to go back to the default.</p>
   <label for="leadInstruction">Lead-capture instruction (added to the prompt)</label>
-  <textarea id="leadInstruction" name="leadInstruction" placeholder="{{ default_lead }}">{{ lead_instruction }}</textarea>
+  <textarea id="leadInstruction" name="leadInstruction" placeholder="{{ default_lead }}">{{ lead_instruction or default_lead }}</textarea>
   <label for="leadAskAfterTurns">Proactively ask after this many messages</label>
   <input type="number" id="leadAskAfterTurns" name="leadAskAfterTurns" min="1" max="20" value="{{ ask_after_turns }}" style="max-width:130px">
   <p class="hint" style="margin-top:6px">The bot also asks sooner if it senses clear intent — this is the backstop. Default {{ default_turns }}.</p>
