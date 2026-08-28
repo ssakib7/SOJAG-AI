@@ -21,7 +21,8 @@ class TurnContext:
     sender_id: str
     session: dict[str, Any]
     combined_text: str = ""            # the whole burst, joined — used by trx-id fallback
-    transcript: str = ""               # rendered conversation for the payment verifier
+    transcript: str = ""               # rendered conversation: payment verifier + the member's own prompt
+    history_turns: int = 0             # committed turns before this one; 0 = genuinely the first reply
     profile: dict[str, Any] | None = None
     ask_contact: bool = False          # deterministic contact-ask fires this turn
     offered_phone: str | None = None   # valid BD number the customer actually typed

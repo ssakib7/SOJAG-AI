@@ -148,12 +148,20 @@ def test_snapshot_ships_already_normalised():
     assert "তুহিন বাদশা ভাইয়া" in json.dumps({**new_kb, "s": sections}, ensure_ascii=False)
 
 
-def test_snapshot_templates_address_the_customer_correctly():
-    """Spot-check the customer-facing templates the fix rewrote."""
+def test_snapshot_exemplars_do_not_open_with_an_honorific():
+    """No kinship terms — and no template that OPENS with স্যার/ম্যাডাম either.
+
+    These templates become few-shot exemplars under === EXAMPLES & SCENARIOS ===, and a
+    concrete example beats an abstract rule every time: with all eight of them leading on
+    the honorific, the model opened almost every reply with "স্যার" no matter what the
+    writing-style rules said. The two "ধন্যবাদ স্যার" payment acknowledgements stay on
+    purpose — a thank-you is exactly where the honorific belongs, and keeping one natural
+    use stops the model reading the honorific as banned.
+    """
     raw = SNAPSHOT.read_text(encoding="utf-8")
-    assert '"স্যার, আপনি কি' in raw or '"ম্যাডাম, আপনি কি' in raw
-    assert '"ভাইয়া, আপনি কি' not in raw
-    assert '"আপু, আপনি কি' not in raw
+    for banned in ('"ভাইয়া, ', '"আপু, ', '"স্যার, আপনি কি', '"ম্যাডাম, আপনি কি', '"জ্বি স্যার,'):
+        assert banned not in raw, f"an exemplar opens with {banned!r}"
+    assert '"ধন্যবাদ স্যার,' in raw, "the natural thank-you use should survive"
 
 
 @pytest.mark.skipif(not SNAPSHOT.exists(), reason="pulled KB snapshot not in the tree")

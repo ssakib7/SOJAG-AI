@@ -124,7 +124,7 @@ class StubHandler(BaseHTTPRequestHandler):
             })
         StubHandler.log.append({"kind": "llm", "role": "member-final", "has_tool_result": has_tool_result,
                                 "tools": tool_names, "payment_scenario": payment_scenario,
-                                "system": system})
+                                "system": system, "messages": messages})
         return completion({"role": "assistant",
                            "content": "ধন্যবাদ স্যার! আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করবেন।"}, "stop")
 

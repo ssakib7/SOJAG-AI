@@ -51,6 +51,25 @@ def _dynamic_blocks(turn: TurnContext) -> str:
     lead = session.get("lead") or {}
     out = ""
 
+    # The conversation, written into the member's own prompt — because it does NOT arrive
+    # any other way. run_turn hands the Team [*history, user], but route mode collapses that
+    # into ONE user turn holding only the customer's words: every assistant reply is
+    # dropped before the member ever sees it (proved on the wire in
+    # tests/test_history_reaches_model.py). The model therefore could not tell it had
+    # already greeted, already introduced the academy, or already answered — so it re-did
+    # all three on every turn, which is exactly what customers saw. Injecting the rendered
+    # transcript here is under our control instead of Agno's, and it lands after
+    # CACHE_BREAK, so the cached prefix is untouched.
+    if turn.history_turns and turn.transcript:
+        out += (
+            "\n\n=== CONVERSATION SO FAR ===\nThis is NOT the first message of this conversation. "
+            "Everything you and the customer have already said is below; the customer's newest "
+            "message is the last line, and also arrives as your user turn.\nRead it before you "
+            "reply: do NOT greet, do NOT welcome, do NOT say স্বাগতম, do NOT re-introduce De Jure "
+            "Academy, and do not repeat a fact, a price, or a question you have already given.\n\n"
+            f"{turn.transcript}"
+        )
+
     if session.get("returning") and real_name(session.get("customer_name")):
         out += (
             f"\n\n=== RETURNING CUSTOMER ===\nThis customer has contacted us before; their name is "
@@ -286,6 +305,7 @@ async def run_turn(turn: TurnContext) -> str:
     rather than a one-line caption of it."""
     history = _history_messages(turn.session)
     turn.transcript = _render_transcript(history, turn.combined_text)
+    turn.history_turns = len(history)
     messages = [*history, Message(role="user", content=turn.combined_text)]
 
     token = current_turn.set(turn)
