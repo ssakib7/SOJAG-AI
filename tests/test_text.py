@@ -1,6 +1,9 @@
 """Pin the deterministic backstops to the old bot's exact behaviour."""
 
+import pytest
+
 from app.utils.text import (
+    claims_payment_verified,
     find_phone,
     find_trx_id,
     looks_like_payment_claim,
@@ -113,3 +116,39 @@ class TestSplit:
         chunks = split_for_messenger("x" * 4100)
         assert all(len(c) <= 2000 for c in chunks)
         assert "".join(chunks) == "x" * 4100
+
+
+class TestPaymentVerifiedGuard:
+    """Only a person can tell a customer their money arrived. The prompt says so; this is
+    the net under the prompt, so a model that oversteps cannot reach the customer.
+
+    Biased toward blocking: a false positive costs a warm sentence and sends the fixed
+    acknowledgement instead. A false negative tells someone their payment cleared when
+    nobody has looked at it.
+    """
+
+    @pytest.mark.parametrize("reply", [
+        "আপনার পেমেন্ট যাচাই হয়েছে স্যার।",
+        "পেমেন্ট সফল হয়েছে, ধন্যবাদ।",
+        "জি স্যার, আপনার টাকা পেয়ে গেছি, ভর্তি সম্পন্ন হয়েছে।",
+        "পেমেন্টটি কনফার্ম হয়েছে।",
+        "আপনার পেমেন্ট গ্রহণ করা হয়েছে।",
+        "Your payment has been confirmed.",
+        "Payment received and approved.",
+    ])
+    def test_blocks_a_settled_payment_claim(self, reply):
+        assert claims_payment_verified(reply)
+
+    @pytest.mark.parametrize("reply", [
+        # The approved acknowledgement itself must always survive.
+        "ধন্যবাদ স্যার। আপনার পাঠানো তথ্যটি আমাদের টিমের কাছে পৌঁছে দিয়েছি। "
+        "আমাদের একজন প্রতিনিধি যাচাই করে খুব শীঘ্রই আপনাকে নিশ্চিত করে জানাবেন।",
+        "ধন্যবাদ স্যার, আপনার পেমেন্টের তথ্যটি পেয়েছি। আমাদের টিম এটি যাচাই করে আপনার সাথে যোগাযোগ করবে।",
+        "পেমেন্ট সম্পন্ন করার জন্য বিকাশ অ্যাপে যান।",  # an instruction, not a claim
+        "পেমেন্টের স্ক্রিনশটটি পাঠান, আমরা যাচাই করে জানাব।",
+        "ক্লাস ৭ই আগস্ট থেকে শুরু হয়েছে স্যার।",
+        "এটি আমাদের ১৯শ বিজেএস অনলি প্রিলি ক্র্যাশ কোর্স।",
+        "",
+    ])
+    def test_leaves_an_honest_reply_alone(self, reply):
+        assert not claims_payment_verified(reply)

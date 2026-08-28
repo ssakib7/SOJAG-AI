@@ -1,8 +1,8 @@
 """Publish/unpublish: the admin panel's master off switch for replies.
 
 Covers the three things that make it a real kill switch rather than a hidden UI toggle:
-events are dropped at the webhook edge, the flag survives a restart, and only an admin
-may flip it.
+events are dropped at the webhook edge, the flag survives a restart, and only a logged-in
+staff account (admin or editor) may flip it.
 """
 
 import asyncio
@@ -128,9 +128,9 @@ class TestAdminRoute:
         assert res.status_code == 403
         assert publish.is_published() is True
 
-    def test_editor_may_not_flip_the_switch(self, client, monkeypatch):
-        """An editor manages courses and blocked users; silencing the whole bot is not
-        theirs to do."""
+    def test_editor_may_flip_the_switch(self, client, monkeypatch):
+        """The editor watches the inbox day to day, so the kill switch is theirs too —
+        and the sidebar card they flip it from must render for them."""
         from app.config import get_settings
 
         monkeypatch.setenv("EDITOR_USERNAME", "editor")
@@ -138,8 +138,13 @@ class TestAdminRoute:
         get_settings.cache_clear()
         try:
             csrf = _login(client, "editor", "editor-pass")
-            res = client.post("/publish", data={"_csrf": csrf, "published": "0"})
-            assert res.status_code == 403
+            assert "Unpublish" in client.get("/blocked").text
+
+            res = client.post("/publish", data={"_csrf": csrf, "published": "0", "next": "/blocked"})
+            assert res.status_code == 200
+            assert publish.is_published() is False
+
+            res = client.post("/publish", data={"_csrf": csrf, "published": "1", "next": "/blocked"})
             assert publish.is_published() is True
         finally:
             get_settings.cache_clear()

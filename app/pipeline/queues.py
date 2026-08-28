@@ -4,7 +4,8 @@ Different customers process fully in parallel, but each customer's own messages 
 strictly in order — and consecutive TEXT messages are answered as ONE batch rather than
 one reply per bubble. Customers routinely split a thought across quick messages
 ("Orko" / "01745..." / "Elephant Road"); answering each separately produced replies
-answering stale snapshots. Non-text events are handled one at a time, in arrival order.
+answering stale snapshots. Photos batch the same way: a multi-photo send arrives as one
+event per picture, and answering each on its own turned one action into a wall of replies.
 """
 
 from __future__ import annotations
@@ -205,7 +206,10 @@ async def _run_sender_loop(sender_id: str, inbox: dict[str, Any]) -> None:
             else:
                 event = inbox["queue"].pop(0)
                 try:
-                    await turn.handle_messaging_event(event)
+                    # The inbox rides along so a burst of photos — and any bubble typed
+                    # while we are reading them — folds into ONE turn and ONE reply,
+                    # the same way consecutive text bubbles always have.
+                    await turn.handle_messaging_event(event, inbox)
                 except Exception as err:
                     log.exception("Error handling event: %s", err)
     finally:

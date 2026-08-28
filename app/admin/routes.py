@@ -2,8 +2,9 @@
 
 Role rules (enforced server-side; hiding UI is not security):
 - admin: everything.
-- editor: courses + books + non-admin-only custom sections + blocklist. On save, the
-  editor's submission replaces ONLY those fields (see forms.merge_editor_kb).
+- editor: courses + books + non-admin-only custom sections + blocklist + the publish
+  switch. On save, the editor's submission replaces ONLY those KB fields (see
+  forms.merge_editor_kb).
 
 Every successful save triggers kb_config.reload() — hot reload, no restart.
 """
@@ -301,13 +302,11 @@ def _safe_next(value: object) -> str:
 
 @router.post("/publish")
 async def publish_toggle(request: Request) -> Response:
-    """Master on/off for replies. Admin-only: an editor manages courses and blocked
-    users, but silencing the whole bot is the account owner's decision."""
+    """Master on/off for replies. Open to both roles: the editor watches the inbox day to
+    day, so they need to be able to silence the bot without waiting for the owner."""
     session, role, value = _auth(request)
     if not session:
         return RedirectResponse("/login", status_code=302)
-    if role != "admin":
-        return _forbidden(request, session["u"], role, auth.csrf_token(value))
     body, csrf_ok = await _form(request)
     if not csrf_ok:
         return PlainTextResponse("Invalid CSRF token.", status_code=403)

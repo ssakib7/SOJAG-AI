@@ -213,8 +213,18 @@ def test_repeated_claim_wording_does_not_realert(monkeypatch, leads_and_payments
     session["lead"]["captured"] = True  # keep the lead path out of the way
 
     async def main():
+        # First two: they say they have paid but sent nothing to identify it. A
+        # representative could not look these up, so they are a prompt to ask for the
+        # proof — not something to page the team about.
         for text in ("টাকা পাঠিয়ে দিয়েছি বিকাশে",
                      "টাকা পাঠাইছি, পাইছেন কিনা জানাবেন?"):
+            t = TurnContext(sender_id="pay-u", session=session, combined_text=text)
+            await turn._apply_side_effects("pay-u", session, t, text, None)
+        assert alerts == [], f"unidentified claim alerted {len(alerts)} time(s)"
+
+        # Then the transaction id arrives, and the same claim reworded after it.
+        for text in ("TRX BKX9912ZQ44 পাঠিয়েছি",
+                     "BKX9912ZQ44 পাঠাইছি, পাইছেন কিনা জানাবেন?"):
             t = TurnContext(sender_id="pay-u", session=session, combined_text=text)
             await turn._apply_side_effects("pay-u", session, t, text, None)
 
@@ -222,6 +232,7 @@ def test_repeated_claim_wording_does_not_realert(monkeypatch, leads_and_payments
     assert len(alerts) == 1, (
         f"one payment, {len(alerts)} Telegram alerts (backstop re-alerted on reworded claim)"
     )
+    assert alerts[0]["trxId"] == "BKX9912ZQ44"
 
 
 # ---------------------------------------------------------------------------

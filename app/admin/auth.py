@@ -1,7 +1,7 @@
 """Admin panel auth: HMAC-signed httpOnly cookie (12h TTL, role in payload), CSRF token
 derived from the cookie value, constant-time comparisons. Two roles: "admin" (full
-access) and "editor" (courses + books + custom sections + blocklist only) — enforced
-server-side; hiding UI is not security.
+access) and "editor" (courses + books + custom sections + blocklist + the publish switch)
+— enforced server-side; hiding UI is not security.
 """
 
 from __future__ import annotations

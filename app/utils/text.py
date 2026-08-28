@@ -128,6 +128,40 @@ def looks_like_payment_claim(text: object) -> bool:
     return not ASKING.search(s)
 
 
+# The one sentence the bot must never write. Only a human can confirm money arrived, so
+# when a receipt is on the table the OUTGOING reply is checked too, not just the incoming
+# message — the prompt already forbids this, and this is the net under the prompt.
+#
+# Deliberately broad on the verb side: a false positive costs the customer a warm sentence
+# and hands them the safe canned acknowledgement instead, which is exactly what they used
+# to get. A false negative tells someone their money is in when nobody has looked.
+VERIFY_SUBJECT = re.compile(
+    r"(পেমেন্ট|পেমেন্টটি|পেমেন্টের|টাকা|টাকাটা|ট্রানজেকশন|লেনদেন|ভর্তি|payment|transaction)",
+    re.IGNORECASE,
+)
+VERIFY_CLAIM = re.compile(
+    r"(যাচাই|নিশ্চিত|কনফার্ম|সফল|গৃহীত|অনুমোদ|সম্পন্ন|গ্রহণ|পৌঁছে|verified|confirmed|"
+    r"successful|approved|received)",
+    re.IGNORECASE,
+)
+# "…হয়েছে" is what turns a word like সম্পন্ন into a claim. "পেমেন্ট সম্পন্ন করুন" is an
+# instruction and must not trip this; "পেমেন্ট সম্পন্ন হয়েছে" must.
+VERIFY_DONE = re.compile(
+    r"(হয়েছে|হয়ে\s*গেছে|হয়ে\s*গেল|হয়েছেন|করা\s*হয়েছে|পেয়ে\s*গেছি|verified|confirmed|"
+    r"successful|approved)",
+    re.IGNORECASE,
+)
+
+
+def claims_payment_verified(text: object) -> bool:
+    """True when a reply tells the customer their payment has landed, cleared, or been
+    accepted. Used only on turns where a receipt was actually seen."""
+    s = str(text or "")
+    if not s.strip():
+        return False
+    return bool(VERIFY_SUBJECT.search(s) and VERIFY_CLAIM.search(s) and VERIFY_DONE.search(s))
+
+
 def short_note(raw: object, max_len: int = 300) -> str:
     """Tidy a model-written note: collapse whitespace to one line, cap length."""
     s = re.sub(r"\s+", " ", str(raw or "")).strip()

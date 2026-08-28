@@ -1,9 +1,10 @@
 """Turn handling: batching, regeneration, pacing, lead/payment side effects.
 
 The heart of the parity port. Key invariants (see AGNO_REBUILD_PLAN.md §6):
-- One burst of bubbles = ONE turn (one msg_count increment, one reply).
-- New bubbles arriving mid-generation or mid-pause discard the draft and regenerate
-  (cap 3); a discarded draft leaves zero trace — no history, no side effects.
+- One burst = ONE turn (one msg_count increment, one reply). Bubbles and PICTURES alike:
+  a multi-photo send, or a question with a photo under it, is a single request.
+- New bubbles or photos arriving mid-generation or mid-pause discard the draft and
+  regenerate (cap 3); a discarded draft leaves zero trace — no history, no side effects.
 - History commits only after the reply is actually sent.
 - Deterministic backstops run UNDER the model: a valid phone number in hand is never
   dropped; an unmistakable payment claim never goes unreported.
@@ -16,6 +17,7 @@ import contextlib
 import html
 import logging
 import random
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,7 +44,15 @@ from app.leads import outbox, sinks
 from app.meta import graph
 from app.ops import blocklist, escalate, followups
 from app.ops.attachments import fetch_attachment_image
-from app.utils.text import NAME_UNKNOWN, find_phone, find_trx_id, looks_like_payment_claim, real_name, short_note
+from app.utils.text import (
+    NAME_UNKNOWN,
+    claims_payment_verified,
+    find_phone,
+    find_trx_id,
+    looks_like_payment_claim,
+    real_name,
+    short_note,
+)
 
 log = logging.getLogger(__name__)
 
@@ -377,7 +387,12 @@ async def _run_model_turn(sender_id: str, session: dict[str, Any], combined: str
 
 
 async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
-    """Answer everything a customer has sent, as one turn (see module docstring)."""
+    """Answer everything a customer has sent, as one turn (see module docstring).
+
+    "Everything" includes pictures. A question with a photo under it is ONE request, and
+    answering the words and the picture in two separate turns produced two replies that
+    talked over each other — the second one arguing with a message the first had already
+    answered."""
     s = get_settings()
     session = state.get_session(sender_id)
     texts = _drain_texts(inbox, sender_id, session)
@@ -391,6 +406,11 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     await asyncio.sleep(_rand_between(800, 2500) / 1000)
     await graph.send_action(sender_id, "mark_seen")
     texts.extend(_drain_texts(inbox, sender_id, session))  # bubbles from the reading beat
+
+    # Pictures sent with the message join this turn rather than opening their own.
+    photos = await _collect_photos(sender_id, _drain_images(inbox, sender_id, MAX_BURST_IMAGES))
+    if photos.proof is not None:
+        return await _receipt_reply(sender_id, session, photos)
 
     await graph.send_action(sender_id, "typing_on")
 
@@ -412,13 +432,14 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     lo, hi = _reply_window_ms()
     attempt = 0
     while True:
-        combined = "\n".join(texts)
+        combined = "\n".join([*texts, photos.caption] if photos else texts)
         # A valid BD number anywhere in the burst — recomputed per attempt, a late bubble
         # may add it. Prefers the number the customer TYPED over the model's copy.
         offered_phone = find_phone(combined) if s.leads_on and not session["lead"]["captured"] else None
 
         start = state.now_ms()
-        turn = await _run_model_turn(sender_id, session, combined, ask_contact, offered_phone, known_phone, profile)
+        turn = await _run_model_turn(sender_id, session, combined, ask_contact, offered_phone,
+                                     known_phone, profile, images=photos.media)
 
         # Hold the reply for the rest of the humanized pause.
         wait = _rand_between(lo, hi) - (state.now_ms() - start)
@@ -427,15 +448,24 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
 
         # The wait-then-check: anything new arrive while we were generating/pausing?
         fresh = _drain_texts(inbox, sender_id, session)
-        if fresh and attempt < MAX_REGENERATIONS:
-            log.info("↺ [%s] %d new message(s) arrived mid-reply — regenerating", sender_id, len(fresh))
+        more = await _collect_photos(
+            sender_id, _drain_images(inbox, sender_id, MAX_BURST_IMAGES - len(photos.urls))
+        )
+        if (fresh or more) and attempt < MAX_REGENERATIONS:
+            log.info("↺ [%s] %d new message(s) and %d photo(s) arrived mid-reply — regenerating",
+                     sender_id, len(fresh), len(more.urls))
+            if more.proof is not None:
+                # A receipt landed mid-reply. The draft is discarded exactly as it would be
+                # for any late message, and the receipt gets the one answer it may have.
+                return await _receipt_reply(sender_id, session, more)
             texts.extend(fresh)
+            photos.extend(more)
             attempt += 1
             await graph.send_action(sender_id, "typing_on")  # keep the bubble alive
             continue  # draft discarded: nothing sent, nothing committed, no side effects
         break
 
-    text = turn.extras["text"]
+    text = _guard_payment_claim(sender_id, turn.extras["text"])
     delivered = await graph.send_message(sender_id, text)
     if turn.extras["commit"] and delivered:
         state.remember_turn(session, combined, text)  # only now does this turn enter history
@@ -444,7 +474,7 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     # Side effects run even on a failed send: the customer's phone number and payment
     # claim are ours whether or not our reply reached them — losing the lead because
     # Meta rejected one message would be the worse failure by far.
-    await _apply_side_effects(sender_id, session, turn, combined, offered_phone)
+    await _apply_side_effects(sender_id, session, turn, combined, offered_phone, photos)
     state.mark_session_dirty(sender_id)
     if delivered:
         await _force_stop_if_off_topic(sender_id, session, turn)
@@ -454,7 +484,8 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
 
 
 async def _apply_side_effects(sender_id: str, session: dict[str, Any], turn: TurnContext,
-                              combined: str, offered_phone: str | None) -> None:
+                              combined: str, offered_phone: str | None,
+                              photos: _Photos | None = None) -> None:
     s = get_settings()
     lead = turn.lead
 
@@ -495,18 +526,44 @@ async def _apply_side_effects(sender_id: str, session: dict[str, Any], turn: Tur
             customer_message=combined,
         )
 
-    if turn.payment:
-        await report_payment_claim(sender_id, session, {**turn.payment, "customerMessage": combined})
-    elif s.payments_on and looks_like_payment_claim(combined):
-        # Regex net UNDER the model's judgment: unmistakable completed-payment wording
-        # (or a trx id) with no report — model outage, skipped call, or the verifier
-        # overruled a real one. Money is involved: never stay silent.
-        log.error("⚠ [%s] payment claim detected but model produced no report — reporting via backstop", sender_id)
+    # Only an IDENTIFIED payment reaches the team: a transaction id, or a screenshot. A bare
+    # "আমি পেমেন্ট করেছি" gives a representative nothing to look up — it is a prompt to ask
+    # for the proof, not a claim to chase — and alerting on it buried the real ones. The
+    # alert fires the moment that proof arrives, on this turn or a later one.
+    screenshot = photos.alert_key if photos else ""
+    trx = short_note((turn.payment or {}).get("trxId"), 40) or find_trx_id(combined) or ""
+
+    if turn.payment and (trx or screenshot):
+        # A screenshot in hand keys the alert, so the model's report and the deterministic
+        # one collapse onto a single entry instead of paging the team twice.
+        keyed = {"attachmentUrl": screenshot, "dedupeKey": screenshot} if screenshot else {}
+        await report_payment_claim(sender_id, session,
+                                   {**turn.payment, "trxId": trx, "customerMessage": combined, **keyed})
+    elif s.payments_on and photos is not None and photos.unchecked and not turn.extras["commit"]:
+        # A file we could not read AND a model call that failed: nothing looked at this at
+        # all, and it might be a receipt. The one case left where guessing beats silence.
+        log.error("⚠ [%s] attachment unread and model unavailable — alerting to be safe", sender_id)
         await report_payment_claim(sender_id, session, {
-            "trxId": find_trx_id(combined) or "",
+            "attachmentUrl": photos.alert_key,
+            "note": "গ্রাহক একটি ফাইল পাঠিয়েছেন — স্বয়ংক্রিয়ভাবে পরীক্ষা করা যায়নি, তাই সতর্কতাবশত পাঠানো হলো। যাচাই করুন।",
+            "dedupeKey": photos.alert_key,
+            "customerMessage": combined,
+        })
+    elif s.payments_on and trx:
+        # Regex net UNDER the model's judgment: a transaction id sitting in the message
+        # with no report — model outage, skipped call, or the verifier overruled a real
+        # one. An id is actionable, so it never goes unreported.
+        log.error("⚠ [%s] transaction id in the message but no report from the model — using the backstop",
+                  sender_id)
+        await report_payment_claim(sender_id, session, {
+            "trxId": trx,
             "note": "স্বয়ংক্রিয়ভাবে শনাক্ত — গ্রাহকের বার্তা দেখে যাচাই করুন।",
             "customerMessage": combined,
         })
+    elif s.payments_on and looks_like_payment_claim(combined):
+        # They say they have paid but sent nothing to identify it. Not an alert — the reply
+        # asks for the transaction id or screenshot, and that is what the team acts on.
+        log.info("[%s] payment claim with no trx id or screenshot — asking for proof, not alerting", sender_id)
 
 
 async def _prompt_for_text(sender_id: str, session: dict[str, Any]) -> None:
@@ -570,9 +627,186 @@ async def handle_entry_event(event: dict[str, Any]) -> None:
     state.mark_session_dirty(sender_id)
 
 
-async def handle_messaging_event(event: dict[str, Any]) -> None:
+# A customer who fires off five photos is making ONE request, not five. Cap what one turn
+# carries anyway: past a handful of pictures the model gains nothing and the turn gets slow.
+MAX_BURST_IMAGES = 4
+
+_BN_DIGITS = str.maketrans("0123456789", "০১২৩৪৫৬৭৮৯")
+
+
+def _image_url(event: dict[str, Any]) -> str | None:
+    """The scontent URL when this event is a plain photo, else None (stickers, videos,
+    files, text, echoes)."""
+    message = event.get("message") or {}
+    if message.get("text") or message.get("is_echo") or not message.get("attachments"):
+        return None
+    attachment = (message.get("attachments") or [{}])[0]
+    if message.get("sticker_id") or (attachment.get("payload") or {}).get("sticker_id"):
+        return None
+    if attachment.get("type") != "image":
+        return None
+    return (attachment.get("payload") or {}).get("url") or None
+
+
+def _drain_images(inbox: dict[str, Any] | None, sender_id: str, limit: int) -> list[str]:
+    """Pull further PHOTOS waiting at the front of the queue into the turn already running,
+    exactly as _drain_texts does for bubbles. Meta delivers a multi-photo send as one event
+    per picture, and answering each on its own turned one action into a wall of replies."""
+    urls: list[str] = []
+    while inbox and inbox["queue"] and len(urls) < limit:
+        url = _image_url(inbox["queue"][0])
+        if not url:
+            break
+        inbox["queue"].pop(0)
+        state.record_recent(sender_id, "(image)")
+        log.info("← [%s] (non-text: image — joins the same turn)", sender_id)
+        urls.append(url)
+    return urls
+
+
+async def _load_images(sender_id: str, urls: list[str]) -> tuple[list[tuple[str, tuple[str, bytes]]], bool]:
+    """Download every picture in the burst, each kept paired with the URL it came from so
+    an alert can point at the picture that caused it. The bool is "something here went
+    unread" — a PDF, an oversized file, a download that failed — which the caller treats
+    as "we don't know" exactly as it always did."""
+    loaded: list[tuple[str, tuple[str, bytes]]] = []
+    unchecked = False
+    for url in urls:
+        try:
+            image = await fetch_attachment_image(url)
+        except Exception as err:
+            log.error("⚠ [%s] attachment download failed: %s", sender_id, err)
+            unchecked = True
+            continue
+        if image is None:
+            unchecked = True  # a PDF, or bigger than we will read
+        else:
+            loaded.append((url, image))
+    return loaded, unchecked
+
+
+def _image_caption(count: int, descriptions: list[str]) -> str:
+    """How the burst is framed for the model. The pictures themselves go along with it —
+    this only says what arrived."""
+    if not count:
+        return "[গ্রাহক এমন একটি ফাইল পাঠিয়েছেন যা আমরা খুলে দেখতে পারিনি।]"
+    detail = "; ".join(d for d in descriptions if d)
+    if count == 1:
+        head = "[গ্রাহক একটি ছবি পাঠিয়েছেন।"
+        return f"{head} ছবিতে রয়েছে: {detail}]" if detail else f"{head}]"
+    n = str(count).translate(_BN_DIGITS)
+    head = f"[গ্রাহক একসাথে {n}টি ছবি পাঠিয়েছেন — এগুলো একটি অনুরোধ, একটিই উত্তর দিন।"
+    return f"{head} ছবিগুলোতে রয়েছে: {detail}]" if detail else f"{head}]"
+
+
+@dataclass
+class _Photos:
+    """The pictures a customer sent in one breath: downloaded once, vetted once, and
+    carried through whichever turn answers them — the photo-only turn, or the text turn
+    they arrived alongside."""
+
+    urls: list[str] = field(default_factory=list)
+    images: list[tuple[str, bytes]] = field(default_factory=list)
+    descriptions: list[str] = field(default_factory=list)
+    proof: Any = None  # the AttachmentVerdict, when one of them is a payment receipt
+    proof_url: str = ""  # the picture that verdict was about
+    unchecked: bool = False  # something here went unread — the caller treats it as "don't know"
+
+    def __bool__(self) -> bool:
+        return bool(self.urls)
+
+    @property
+    def media(self) -> list[Image] | None:
+        return [Image(content=data, mime_type=mime) for mime, data in self.images] or None
+
+    @property
+    def caption(self) -> str:
+        """How the pictures are framed for the model, alongside the pictures themselves.
+        A receipt never reaches the model at all — see _receipt_reply."""
+        return _image_caption(len(self.images), self.descriptions)
+
+    def extend(self, other: "_Photos") -> None:
+        self.urls += other.urls
+        self.images += other.images
+        self.descriptions += other.descriptions
+        if self.proof is None and other.proof is not None:
+            self.proof, self.proof_url = other.proof, other.proof_url
+        self.unchecked = self.unchecked or other.unchecked
+
+    @property
+    def alert_key(self) -> str:
+        """What a payment alert about this burst is keyed and linked on."""
+        return self.proof_url or (self.urls[0] if self.urls else "")
+
+
+async def _collect_photos(sender_id: str, urls: list[str]) -> _Photos:
+    """Download the burst and ask the classifier the one question it answers: is any of
+    this a payment receipt? payments_on gates the CLASSIFIER only — the model gets to look
+    at a course poster either way."""
+    photos = _Photos(urls=list(urls))
+    if not urls:
+        return photos
+    pairs, photos.unchecked = await _load_images(sender_id, urls)
+    photos.images = [image for _, image in pairs]
+    if not get_settings().payments_on:
+        return photos
+    for source, image in pairs:
+        try:
+            verdict = await classify_image(*image)
+        except Exception as err:
+            log.error("⚠ [%s] attachment classification failed, alerting to be safe: %s", sender_id, err)
+            photos.unchecked = True
+            continue
+        photos.descriptions.append(verdict.description)
+        if verdict.is_payment_proof:
+            photos.proof, photos.proof_url = verdict, source
+            break
+    return photos
+
+
+async def _receipt_reply(sender_id: str, session: dict[str, Any], photos: _Photos) -> None:
+    """The whole reply to a receipt: tell the team, then tell the customer we have passed
+    it on. Fixed wording, never the model's — only a person can confirm that money arrived,
+    and a warm sentence that oversteps that is the single most expensive thing the bot
+    could say. Their other questions are answered by the representative who follows up."""
+    await _report_receipt(sender_id, session, photos)
+    await graph.send_message(sender_id, FALLBACK_ATTACHMENT)
+    log.info("→ [%s] %s", sender_id, FALLBACK_ATTACHMENT)
+    state.mark_session_dirty(sender_id)
+
+
+def _guard_payment_claim(sender_id: str, text: str) -> str:
+    """Last line of defence on the way out. The prompt forbids telling a customer their
+    payment has been verified, received or approved; this makes it impossible. A reply that
+    oversteps is replaced by the acknowledgement it should have been."""
+    if not claims_payment_verified(text):
+        return text
+    log.error('⚠ [%s] model claimed a payment was settled — reply replaced. It wrote: "%s"',
+              sender_id, short_note(text, 300))
+    return FALLBACK_ATTACHMENT
+
+
+async def _report_receipt(sender_id: str, session: dict[str, Any], photos: _Photos) -> None:
+    """A receipt is news for the team whatever else the customer typed alongside it.
+    Reported HERE, deterministically, so it never depends on the model remembering to call
+    the tool while it is busy answering the question underneath the screenshot."""
+    if photos.proof is None:
+        return
+    log.info("attachment: payment proof — %s", photos.proof.description)
+    await report_payment_claim(sender_id, session, {
+        "attachmentUrl": photos.alert_key,
+        "note": f"গ্রাহক পেমেন্টের প্রমাণ পাঠিয়েছেন: {photos.proof.description} — যাচাই করুন।",
+        "dedupeKey": photos.alert_key,
+    })
+
+async def handle_messaging_event(event: dict[str, Any], inbox: dict[str, Any] | None = None) -> None:
     """Non-text events: stickers (silent), images (downloaded once, then answered by the
     model that can actually see them), everything else (one nudge per 10-min cooldown).
+
+    ONE burst = ONE reply, the same invariant the text path has always held. A multi-photo
+    send arrives as one event per picture, and bubbles typed straight after a photo arrive
+    as their own events; each used to get its own full turn, so a single customer action
+    came back as a stack of replies talking over each other.
 
     payments_on gates only the payment-proof CLASSIFIER and its alert — not whether the
     model gets to look. A course poster or a book page is worth answering either way."""
@@ -621,88 +855,86 @@ async def handle_messaging_event(event: dict[str, Any]) -> None:
     followups.schedule(sender_id, session)
     await graph.send_action(sender_id, "mark_seen")
 
-    # One download, two consumers: the payment classifier below and — when it says this is
-    # not a receipt — the reply itself, which answers the actual picture.
-    image = None
-    unchecked = False
-    try:
-        image = await fetch_attachment_image(url)
-        if image is None:
-            unchecked = True  # a PDF, or bigger than we will read
-    except Exception as err:
-        log.error("⚠ [%s] attachment download failed: %s", sender_id, err)
-        unchecked = True
-
-    # Look at the image before alerting anyone. Anything we could not actually check —
-    # a PDF, a failed download, an unreachable model — counts as "don't know", and
-    # don't-know ALERTS: an unnoticed payment is far worse than a redundant alert.
-    verdict = None
-    if s.payments_on and image is not None:
-        try:
-            verdict = await classify_image(*image)
-        except Exception as err:
-            log.error("⚠ [%s] attachment classification failed, alerting to be safe: %s", sender_id, err)
-            unchecked = True
+    # Everything the customer sent in this breath, answered together.
+    # One download per picture, two consumers: the payment classifier and — when it says
+    # none of these is a receipt — the reply itself, which answers the actual pictures.
+    # Anything we could not check (a PDF, a failed download, an unreachable classifier)
+    # counts as "don't know", and don't-know ALERTS further down: an unnoticed payment is
+    # far worse than a redundant alert.
+    photos = await _collect_photos(sender_id, [url] + _drain_images(inbox, sender_id, MAX_BURST_IMAGES - 1))
 
     # A receipt is the one thing worth interrupting the team for, so it short-circuits here.
-    if s.payments_on and verdict is not None and verdict.is_payment_proof:
-        log.info("attachment: payment proof — %s", verdict.description)
-        await report_payment_claim(sender_id, session, {
-            "attachmentUrl": url,
-            "note": f"গ্রাহক পেমেন্টের প্রমাণ পাঠিয়েছেন: {verdict.description} — যাচাই করুন।",
-            "dedupeKey": url,
-        })
-        await graph.send_message(sender_id, FALLBACK_ATTACHMENT)
-        log.info("→ [%s] %s", sender_id, FALLBACK_ATTACHMENT)
-        state.mark_session_dirty(sender_id)
-        return
+    # One alert and one acknowledgement for the whole burst, however many shots of the same
+    # transaction the customer sent.
+    if photos.proof is not None:
+        return await _receipt_reply(sender_id, session, photos)
 
     # Everything else — including a file we could not open — goes through the normal
     # conversation path. A photo is not by itself news for the team: the MODEL decides
     # whether this needs their attention, exactly as it does for text, because it has the
     # history and the report_payment tool. Guessing from "we couldn't read it" alone was
     # paging the team for every oversized selfie and every PDF.
-    description = verdict.description if verdict else ""
-    log.info("attachment: not payment proof — %s", description or "(not classified)")
-    # The image itself goes to the model, so it can answer a course poster, a book page or
-    # a screenshot on its own terms. The caption only frames it — it is no longer the only
-    # thing the model gets to see.
-    if image is None:
-        as_text = "[গ্রাহক এমন একটি ফাইল পাঠিয়েছেন যা আমরা খুলে দেখতে পারিনি।]"
-    elif description:
-        as_text = f"[গ্রাহক একটি ছবি পাঠিয়েছেন। ছবিতে রয়েছে: {description}]"
-    else:
-        as_text = "[গ্রাহক একটি ছবি পাঠিয়েছেন।]"
+    log.info("attachment: not payment proof — %s",
+             "; ".join(d for d in photos.descriptions if d) or "(not classified)")
+    # The pictures themselves go to the model, so it can answer a course poster, a book
+    # page or a screenshot on its own terms. The caption only frames them — it is no longer
+    # the only thing the model gets to see.
+    as_text = photos.caption
     await graph.send_action(sender_id, "typing_on")
     profile = await _profile_with_gender(sender_id)
-    start = state.now_ms()
-    turn = await _run_model_turn(sender_id, session, as_text, False, None,
-                                 state.customers.get(sender_id, {}).get("phone") or None, profile,
-                                 images=[Image(content=image[1], mime_type=image[0])] if image else None)
-    delivered = await _human_send(sender_id, turn.extras["text"], head_start_ms=state.now_ms() - start)
+
+    # Wait-then-check, exactly as handle_text_batch does it: a bubble the customer types
+    # while we are looking at their photo joins THIS turn instead of earning a second
+    # reply. A discarded draft leaves no trace — no history, no side effects.
+    lo, hi = _reply_window_ms()
+    attempt = 0
+    while True:
+        start = state.now_ms()
+        turn = await _run_model_turn(
+            sender_id, session, as_text, False, None,
+            state.customers.get(sender_id, {}).get("phone") or None, profile,
+            images=photos.media,
+        )
+        wait = _rand_between(lo, hi) - (state.now_ms() - start)
+        if wait > 0:
+            await asyncio.sleep(wait / 1000)
+        fresh = _drain_texts(inbox, sender_id, session) if inbox else []
+        if fresh and attempt < MAX_REGENERATIONS:
+            log.info("↺ [%s] %d message(s) arrived while we read the photo — regenerating",
+                     sender_id, len(fresh))
+            as_text = "\n".join([as_text, *fresh])
+            attempt += 1
+            await graph.send_action(sender_id, "typing_on")  # keep the bubble alive
+            continue  # draft discarded: nothing sent, nothing committed, no side effects
+        break
+
+    text = _guard_payment_claim(sender_id, turn.extras["text"])
+    delivered = await graph.send_message(sender_id, text)
     if turn.extras["commit"] and delivered:
-        state.remember_turn(session, as_text, turn.extras["text"])
-    log.info("→ [%s] %s%s", sender_id, turn.extras["text"], "" if delivered else "  [NOT DELIVERED]")
+        state.remember_turn(session, as_text, text)
+    log.info("→ [%s] %s%s", sender_id, text, "" if delivered else "  [NOT DELIVERED]")
     if turn.notice:
         await escalate.notify_team(sender_id, session, turn.notice["category"],
                                    turn.notice["reason"], customer_message=as_text)
     if not delivered:
         await _alert_undelivered(sender_id, session, as_text)
 
-    # The image wasn't proof, but the model may still act on the conversation around it
+    # The picture wasn't proof, but the model may still act on the conversation around it
     # (e.g. they told us they'd paid a moment ago) — honour those like the text path does.
     if get_settings().leads_on and turn.lead and not session["lead"]["captured"]:
         await capture_lead(sender_id, session, await _profile_first_lead(sender_id, turn.lead))
     if turn.payment:
-        await report_payment_claim(sender_id, session, {**turn.payment, "attachmentUrl": url, "dedupeKey": url})
-    elif s.payments_on and unchecked and not turn.extras["commit"]:
+        await report_payment_claim(sender_id, session,
+                                   {**turn.payment, "attachmentUrl": photos.alert_key,
+                                    "dedupeKey": photos.alert_key})
+    elif s.payments_on and photos.unchecked and not turn.extras["commit"]:
         # We could not read the file AND the model call failed: nothing looked at this at
         # all, and it might be a receipt. This is the only case left worth guessing on.
         log.error("⚠ [%s] attachment unread and model unavailable — alerting to be safe", sender_id)
         await report_payment_claim(sender_id, session, {
-            "attachmentUrl": url,
+            "attachmentUrl": photos.alert_key,
             "note": "গ্রাহক একটি ফাইল পাঠিয়েছেন — স্বয়ংক্রিয়ভাবে পরীক্ষা করা যায়নি, তাই সতর্কতাবশত পাঠানো হলো। যাচাই করুন।",
-            "dedupeKey": url,
+            "dedupeKey": photos.alert_key,
         })
     state.mark_session_dirty(sender_id)
     if delivered:

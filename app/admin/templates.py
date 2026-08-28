@@ -198,7 +198,7 @@ SHELL = """<!doctype html><html lang="en"><head><meta charset="utf-8">
   {% elif bot_flash == "unpublished" %}<div class="flash flash-warn">Bot unpublished. It will not reply to anyone until you publish it again.</div>{% endif %}
   {% if not published %}<div class="offline-banner"><strong>The bot is unpublished.</strong>
     Every message from a customer is ignored — no replies, no follow-up nudges. Answer from the Page inbox
-    until an administrator publishes it again.</div>{% endif %}
+    until it is published again.</div>{% endif %}
 {% endif %}
 {% block content %}{% endblock %}
 </main>
@@ -237,7 +237,6 @@ SIDEBAR = """<aside class="sidebar">
     {% if role == "admin" %}<a href="{{ base }}sec-enroll">Enrollment</a>{% endif %}
     <a href="{{ base }}sec-custom">Custom sections</a>
   </nav>
-  {% if role == "admin" %}
   <div class="pub-card{% if not published %} off{% endif %}">
     <div class="pub-state"><span class="pub-dot"></span>{% if published %}Published{% else %}Unpublished{% endif %}</div>
     <div class="pub-hint">{% if published %}The bot is answering customers.{% else %}The bot is replying to nobody.{% endif %}</div>
@@ -250,7 +249,6 @@ SIDEBAR = """<aside class="sidebar">
         {% if published %}Unpublish{% else %}Publish{% endif %}</button>
     </form>
   </div>
-  {% endif %}
   <div class="nav-foot">
     {% if user %}<div class="who">{{ user }} · {% if role == "admin" %}Admin{% else %}Courses &amp; products{% endif %}</div>{% endif %}
     <form method="post" action="/logout">
