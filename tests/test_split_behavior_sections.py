@@ -129,14 +129,31 @@ def test_unrecognised_kinship_terms_are_reported_not_guessed():
     assert residual_address_terms(line) == ["ঠিক আছে ভাইয়া আমি দেখছি"]
 
 
-def test_snapshot_has_no_customer_facing_kinship_terms_left():
+def test_snapshot_ships_already_normalised():
+    """The snapshot now carries স্যার/ম্যাডাম already, so the split has nothing to fix.
+
+    The 8 fixes were applied to knowledge_base.json itself rather than left for the
+    migration to make on the way in. Importing the KB and running the split are two separate
+    manual steps on the server, and between them the bot answers customers — so the file
+    must be safe to import on its own, without depending on a later step to bring its
+    templates in line with the system prompt's ban on ভাইয়া/আপু.
+    """
     kb = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     new_kb, sections, summary = split_sections(kb, [])
 
-    assert summary["addresses_fixed"] == ["8"]
+    assert summary["addresses_fixed"] == ["0"], "the snapshot regained a kinship term"
     assert summary["residual_address_terms"] == []
-    # And the third-party honorific really did survive the sweep.
+    # The third-party honorific is correct Bengali and must never be swept: the operations
+    # manager is a person being referred to, not the customer being addressed.
     assert "তুহিন বাদশা ভাইয়া" in json.dumps({**new_kb, "s": sections}, ensure_ascii=False)
+
+
+def test_snapshot_templates_address_the_customer_correctly():
+    """Spot-check the customer-facing templates the fix rewrote."""
+    raw = SNAPSHOT.read_text(encoding="utf-8")
+    assert '"স্যার, আপনি কি' in raw or '"ম্যাডাম, আপনি কি' in raw
+    assert '"ভাইয়া, আপনি কি' not in raw
+    assert '"আপু, আপনি কি' not in raw
 
 
 @pytest.mark.skipif(not SNAPSHOT.exists(), reason="pulled KB snapshot not in the tree")
@@ -148,10 +165,24 @@ def test_against_the_real_pulled_snapshot():
     assert len(summary["moved"]) == len(BEHAVIOUR_TITLES), f"unmatched titles: {summary}"
     assert _titles(new_kb["customSections"]) == [
         "Qualification for attending BJS Exam",
-        "Free Class Link of 20th BJS Alpha Batch in 21 August, 2026",
         *[f["title"] for f in FACT_SECTIONS],
     ]
     # Nothing was lost: every original section is either still in the KB or now a prompt section.
     originals = {s["title"].rstrip(":").strip() for s in kb["customSections"]}
     landed = {*_titles(new_kb["customSections"]), *_titles(sections)}
     assert originals <= landed
+
+
+def test_snapshot_carries_no_expired_free_class_material():
+    """The 21-22 August 2026 masterclasses are over.
+
+    That content was in the snapshot three times — its own custom section, three columns of
+    the BJS Alpha course row, and a paragraph inside "Course in details" — and every copy
+    told the bot to withhold the Zoom links until the customer surrendered a name and phone
+    number, for a class that had already happened. Deleting one copy would have left the bot
+    handing the links out from another, so this asserts on the whole file.
+    """
+    raw = SNAPSHOT.read_text(encoding="utf-8")
+    assert "zoom.us" not in raw, "a dead masterclass Zoom link is back in the knowledge base"
+    assert "Free Class Link" not in raw
+    assert "Free Masterclass Opportunity" not in raw

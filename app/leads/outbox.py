@@ -49,7 +49,13 @@ def _sinks() -> dict[str, dict[str, Sink]]:
 _now_ms = lambda: int(time.time() * 1000)  # noqa: E731
 
 # Since-boot counters + most recent delivery error, surfaced via /health.
-stats: dict[str, Any] = {"enqueued": 0, "resolved": 0, "last_error": None}
+# write_failures counts items that never made it INTO the outbox at all — a different and
+# worse failure than a delivery that is merely retrying, because there is nothing left to
+# retry. See enqueue().
+stats: dict[str, Any] = {
+    "enqueued": 0, "resolved": 0, "last_error": None,
+    "write_failures": 0, "last_write_error": None,
+}
 _delivering = False
 _wakeup: asyncio.Event | None = None
 
@@ -66,14 +72,24 @@ async def enqueue(kind: str, payload: dict[str, Any]) -> str:
     the database write itself fails — the caller logs the contact details as last resort."""
     item_id = f"{_now_ms()}-{random.randbytes(4).hex()}"
     payload = {**payload, "leadId": item_id}  # lets the Sheet dedupe retried deliveries
-    async with db_session() as db:
-        db.add(_ledger_row(kind, item_id, payload))
-        db.add(OutboxRow(
-            id=item_id, kind=kind, at=_now_ms(), payload=payload,
-            sinks={name: "pending" for name in _sinks()[kind]},
-            attempts=0, not_before=0, done=False,
-        ))
-        await db.commit()
+    try:
+        async with db_session() as db:
+            db.add(_ledger_row(kind, item_id, payload))
+            db.add(OutboxRow(
+                id=item_id, kind=kind, at=_now_ms(), payload=payload,
+                sinks={name: "pending" for name in _sinks()[kind]},
+                attempts=0, not_before=0, done=False,
+            ))
+            await db.commit()
+    except Exception as err:
+        # The ledger row and the outbox row share this transaction on purpose, so a failure
+        # here loses BOTH: the item is not recorded and not queued, and no retry loop will
+        # ever pick it up. The caller's log line and (for leads) its Telegram alert are the
+        # only copies left, so this must be loud in /health rather than silent — a bot that
+        # captures leads into nowhere looked perfectly healthy for a full day.
+        stats["write_failures"] += 1
+        stats["last_write_error"] = f"{kind}: {err}"
+        raise
     stats["enqueued"] += 1
     if _wakeup is not None:
         _wakeup.set()  # fire-and-forget; the retry loop covers any failure
@@ -168,6 +184,8 @@ async def get_outbox_stats() -> dict[str, Any]:
         "enqueued_since_boot": stats["enqueued"],
         "resolved_since_boot": stats["resolved"],
         "last_error": stats["last_error"],
+        "write_failures": stats["write_failures"],
+        "last_write_error": stats["last_write_error"],
     }
 
 

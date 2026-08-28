@@ -77,6 +77,13 @@ async def _startup_selfcheck(settings) -> None:  # noqa: ANN001
     if settings.shadow_mode or settings.selfcheck_disabled:
         return
     problems = settings.startup_warnings()
+    # An empty knowledge base is not a config typo — it is the bot booting with nothing to
+    # say — so it rides the same restart ping the team already reads. It went unnoticed for
+    # a day because every other signal (health 200, no errors, fluent Bengali replies)
+    # looked normal while every answer was "a representative will contact you".
+    if not kb_config.kb_has_content():
+        problems.insert(0, "KNOWLEDGE BASE IS EMPTY — the bot cannot answer a single "
+                           "question. Import it before publishing replies.")
     try:
         ok = await sinks.send_telegram_text(
             "✅ De Jure bot restarted and is listening.\n"
@@ -141,6 +148,13 @@ async def lifespan(app: FastAPI):
     log.info("Replies: %s", "PUBLISHED" if publish.is_published()
              else "UNPUBLISHED — the bot will not answer anyone until an admin publishes it")
     log.info("LLM: %s (%s)", settings.llm_provider, settings.llm_model)
+    kb_stats = kb_config.kb_summary()
+    log.info(
+        "Knowledge base: %d course(s) in %d categor(ies), %d custom section(s), "
+        "%d chars of book text — %d char assembled prompt",
+        kb_stats["courses"], kb_stats["categories"], kb_stats["customSections"],
+        kb_stats["booksChars"], kb_stats["promptChars"],
+    )
 
     # Misconfiguration that silently costs leads is worth shouting about — these used to
     # be invisible until someone noticed the sheet had been empty for a week.

@@ -50,8 +50,15 @@ Remaining manual steps — the bot cannot do these for you:
   1. EXTERNAL UPTIME MONITOR (the most important one).
      Point a monitor at https://bot.dejureacademy.net/health every 1-5 minutes,
      alerting on any non-200. /health returns 503 when lead delivery is stuck,
-     when replies are not reaching Facebook, or when the AI model is failing.
-     Without this, the bot can be broken for days and nobody will know.
+     when a lead/payment/escalation write has FAILED (data lost), when the
+     knowledge base is empty, when replies are not reaching Facebook, when the
+     AI model is failing, or when lead capture is switched off.
+     Without this, the bot can be broken for days and nobody will know — it
+     served an empty knowledge base for a day while returning a clean 200.
+
+     Do NOT point the monitor at /health/live. That one is the container's own
+     healthcheck (autoheal restarts on it) and reports liveness only, so it
+     stays 200 through every problem a restart cannot fix.
      Free options: UptimeRobot, BetterStack, Healthchecks.io.
 
   2. VERIFY A RESTORE, once, before you need it:

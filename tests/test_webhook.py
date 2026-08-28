@@ -75,12 +75,23 @@ class TestEvents:
 
 
 class TestHealth:
-    def test_ok(self, client):
+    """The test database carries no knowledge base, so /health is legitimately degraded
+    here — that is the check working, not a broken fixture. See test_health_grading.py for
+    the graded conditions and the liveness split."""
+
+    def test_reports_empty_knowledge_base(self, client):
         res = client.get("/health")
-        assert res.status_code == 200
+        assert res.status_code == 503
         data = res.json()
-        assert data["status"] == "ok"
+        assert "knowledge base is EMPTY" in data["status"]
         assert "outbox" in data
+        assert data["knowledgeBase"]["courses"] == 0
+
+    def test_liveness_is_independent_of_grading(self, client):
+        """Autoheal must NOT restart-loop over an empty knowledge base."""
+        res = client.get("/health/live")
+        assert res.status_code == 200
+        assert res.json()["status"] == "alive"
 
 
 class TestLegalPages:

@@ -155,3 +155,36 @@ def lead_ask_after_turns() -> int:
 
 def current_kb() -> dict[str, Any]:
     return _cache["kb"]
+
+
+def kb_summary() -> dict[str, int]:
+    """How much the bot actually knows, for /health and the boot log.
+
+    `about`, `books` and `enroll` are free text in this schema, not lists — measured in
+    characters, so the field names have to say so or a reader counts 2,623 "books".
+    """
+    kb = _cache["kb"] or {}
+    categories = kb.get("courseCategories") or []
+    return {
+        "courses": sum(len(c.get("courses") or []) for c in categories),
+        "categories": len(categories),
+        "customSections": len(kb.get("customSections") or []),
+        "aboutChars": len(str(kb.get("about") or "").strip()),
+        "booksChars": len(str(kb.get("books") or "").strip()),
+        "promptChars": len(_cache["system_prompt_full"]),
+    }
+
+
+def kb_has_content() -> bool:
+    """False when the assembled prompt carries no facts at all.
+
+    This is the state the bot shipped in for a day: an empty `knowledge_base` config row
+    renders a valid but factless catalogue (headers, empty tables), and STRICT_ADHERENCE
+    then forbids the model from saying anything — so every customer got "a representative
+    will contact you" and nobody could tell from the outside. It must be impossible to boot
+    into that silently again, so it is checked at boot AND on every /health poll.
+    """
+    s = kb_summary()
+    # `about` deliberately does not count: a bot that knows only who we are, with no course,
+    # price, book or behaviour section, still cannot answer a single customer question.
+    return bool(s["courses"] or s["booksChars"] or s["customSections"])

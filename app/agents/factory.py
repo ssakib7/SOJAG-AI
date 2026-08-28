@@ -79,14 +79,18 @@ def _dynamic_blocks(turn: TurnContext) -> str:
         profile.get("gender_guess") if profile.get("gender_guess") in ("male", "female") else None
     )
     # স্যার / ম্যাডাম only. The system prompt bans kinship terms outright, so knowing the gender
-    # picks between the two honorifics — it never unlocks ভাইয়া/আপু as an alternative. A wrong
-    # term is cheap to write and expensive to read, so every branch names the one to use.
+    # picks WHICH of the two honorifics to use when one is used — it never unlocks ভাইয়া/আপু as
+    # an alternative, and it is not an instruction to use one this turn. That distinction is the
+    # whole point of the wording below: this block is injected on EVERY turn, so phrasing it as
+    # "address them as স্যার" read to the model as a per-turn order and produced a bot that
+    # opened all but its first reply with "স্যার" — the honorific-frequency rule in the system
+    # prompt decides HOW OFTEN, this block only decides WHICH.
     if known_gender:
         name_part = f' ("{profile["name"]}")' if profile.get("name") else ""
         gendered = (
-            "a man — address him as স্যার"
+            "a man, so the correct honorific for them is স্যার"
             if known_gender == "male"
-            else "a woman — address her as ম্যাডাম"
+            else "a woman, so the correct honorific for them is ম্যাডাম"
         )
         out += (
             f"\n\n=== ADDRESSING THE CUSTOMER ===\nThis customer's Facebook profile{name_part} indicates they "
@@ -98,15 +102,18 @@ def _dynamic_blocks(turn: TurnContext) -> str:
         out += (
             f"\n\n=== ADDRESSING THE CUSTOMER ===\nThis customer's Facebook profile name is "
             f"\"{profile['name']}\", which does NOT reliably indicate their gender. Unless the conversation "
-            "itself makes their gender clear, address them as স্যার per the guidelines above, and never as "
-            "ভাইয়া or আপু."
+            "itself makes their gender clear, the correct honorific for them is স্যার, and never ভাইয়া or আপু."
         )
     else:
         out += (
             "\n\n=== ADDRESSING THE CUSTOMER ===\nNothing is known about this customer's gender. Unless the "
-            "conversation itself makes it clear, address them as স্যার per the guidelines above, and never "
-            "as ভাইয়া or আপু."
+            "conversation itself makes it clear, the correct honorific for them is স্যার, and never ভাইয়া "
+            "or আপু."
         )
+    out += (
+        "\nThis tells you WHICH honorific is correct, not how often to use it — keep using it as "
+        "sparingly as the writing-style rules above require, and do not open every reply with it."
+    )
 
     if get_settings().payments_on:
         out += (

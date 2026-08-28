@@ -19,10 +19,13 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      # /health returns 503 when lead delivery is stuck, replies are not reaching Facebook,
-      # or the model is failing — see app/webhook/routes.py. Read by `docker ps`, by the
-      # autoheal sidecar below, and (the one that matters) by the external uptime monitor.
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3000/health', timeout=5).status==200 else 1)"]
+      # /health/live, NOT /health. /health is graded for the external uptime monitor and
+      # 503s on problems a restart cannot fix (empty knowledge base, lead capture switched
+      # off, a lead write that already failed) — pointing autoheal at it would produce a
+      # permanent restart loop that drops session state and queues on every cycle.
+      # /health/live proves only that the event loop runs and the database answers, which
+      # is the wedged-but-alive failure autoheal exists to fix. See app/webhook/routes.py.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3000/health/live', timeout=5).status==200 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3

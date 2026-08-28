@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, Index, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -28,6 +28,12 @@ JSONType = JSON().with_variant(JSONB(), "postgresql")
 
 
 def utcnow() -> datetime:
+    """Timezone-aware UTC. Every column it feeds is DateTime(timezone=True) on purpose:
+    Postgres rejects an aware datetime into a bare `timestamp without time zone`
+    ("can't subtract offset-naive and offset-aware datetimes"), which failed EVERY write
+    to bot_config, leads, payment_claims and shadow_drafts. The tests run on SQLite,
+    which stores datetimes as strings and accepts either, so this stayed invisible until
+    the first real Postgres write. If you add a datetime column, give it timezone=True."""
     return datetime.now(timezone.utc)
 
 
@@ -78,7 +84,7 @@ class LeadRow(Base):
     __tablename__ = "leads"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)  # outbox item id
-    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     payload: Mapped[dict] = mapped_column(JSONType, default=dict)
 
 
@@ -88,7 +94,7 @@ class PaymentClaimRow(Base):
     __tablename__ = "payment_claims"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
-    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     payload: Mapped[dict] = mapped_column(JSONType, default=dict)
 
 
@@ -99,7 +105,7 @@ class NoticeRow(Base):
     __tablename__ = "notices"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
-    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     payload: Mapped[dict] = mapped_column(JSONType, default=dict)
 
 
@@ -148,7 +154,7 @@ class ConfigRow(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSONType, default=dict)
-    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class ShadowDraftRow(Base):
@@ -158,7 +164,7 @@ class ShadowDraftRow(Base):
     __tablename__ = "shadow_drafts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     sender_id: Mapped[str] = mapped_column(String(64), index=True)
     kind: Mapped[str] = mapped_column(String(16), default="message")  # message | action
     text: Mapped[str] = mapped_column(Text, default="")

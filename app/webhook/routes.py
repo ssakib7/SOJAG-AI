@@ -186,23 +186,54 @@ async def webhook_events(request: Request) -> Response:
     return PlainTextResponse("EVENT_RECEIVED")
 
 
+@router.get("/health/live")
+async def health_live() -> Response:
+    """Liveness ONLY, for the container healthcheck and autoheal. Never reports a problem a
+    restart cannot fix.
+
+    /health below is graded for a human monitor, so it 503s on things like an empty
+    knowledge base or lead capture being switched off. Wiring the container healthcheck to
+    that would hand autoheal a restart loop over a condition no restart can repair — and
+    each restart drops the in-memory session state, per-sender queues and follow-up timers.
+    So autoheal watches this instead: it proves the event loop still runs and the database
+    still answers, which is exactly the wedged-but-alive failure autoheal exists for.
+    """
+    try:
+        await outbox.pending_count()  # real round-trip: event loop + connection pool + db
+    except Exception as err:
+        return JSONResponse(status_code=503, content={"status": f"database unreachable: {err}"})
+    return JSONResponse(status_code=200, content={"status": "alive", "uptimeSec": round(time.time() - _boot)})
+
+
 @router.get("/health")
 async def health() -> Response:
     """Built for an EXTERNAL uptime monitor — the bot must not be the only thing that
-    knows the bot is broken. 503 when lead delivery is stuck. Counts only, no PII."""
+    knows the bot is broken. 503 when the bot is useless to a customer. Counts only, no PII.
+
+    NOT the container healthcheck: see /health/live for why autoheal must not read this.
+    """
     from app.agents.model import llm_stats
+    from app.kb import config as kb_config
     from app.meta.graph import send_stats
     from app.ops import publish
 
     s = get_settings()
     stats = await outbox.get_outbox_stats()
 
-    # Three independent ways the bot can be useless while the process looks perfectly
-    # healthy: leads not draining, Meta refusing our replies, or the model down. An
-    # external uptime monitor watching only "does it return 200" must catch all three.
+    # Six independent ways the bot can be useless while the process looks perfectly
+    # healthy: leads not draining, leads never reaching the queue at all, Meta refusing our
+    # replies, the model down, the bot holding no knowledge base, or lead capture switched
+    # off. An external uptime monitor watching only "does it return 200" must catch all.
     problems = []
     if stats["oldest_pending_ms"] > OUTBOX_STUCK_MS:
         problems.append("lead delivery stuck")
+    # Never resets: a lost lead stays lost, and a single one is worth a human look. This
+    # was silent for a day while every lead, payment claim and escalation was dropped by a
+    # failing database write — "0 pending" looked like calm, not like nothing arriving.
+    if stats["write_failures"]:
+        problems.append(f"{stats['write_failures']} lead/payment/escalation write(s) FAILED — data lost")
+    if not kb_config.kb_has_content():
+        problems.append("knowledge base is EMPTY — the bot cannot answer any question")
     if send_stats["consecutive_failures"] >= SEND_FAILURE_ALERT:
         problems.append("replies not reaching Facebook")
     if llm_stats["consecutive_failures"] >= LLM_FAILURE_ALERT:
@@ -224,7 +255,10 @@ async def health() -> Response:
                 "enqueuedSinceBoot": stats["enqueued_since_boot"],
                 "resolvedSinceBoot": stats["resolved_since_boot"],
                 "lastError": stats["last_error"],
+                "writeFailures": stats["write_failures"],
+                "lastWriteError": stats["last_write_error"],
             },
+            "knowledgeBase": kb_config.kb_summary(),
             "send": {
                 "failedSinceBoot": send_stats["failed_since_boot"],
                 "consecutiveFailures": send_stats["consecutive_failures"],

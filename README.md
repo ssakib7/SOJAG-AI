@@ -39,7 +39,8 @@ messages. Scale the single process, never the replica count.
 
 | Step | Why |
 |---|---|
-| Point an external monitor at `/health` (1–5 min) | It returns **503** when lead delivery is stuck, replies are not reaching Facebook, or the model is failing. Nothing else notices a broken bot. |
+| Point an external monitor at `/health` (1–5 min) | It returns **503** when the knowledge base is empty, a lead/payment/escalation write has failed, lead delivery is stuck, replies are not reaching Facebook, or the model is failing. Nothing else notices a broken bot. Not `/health/live` — that is the container's own probe and stays 200 through anything a restart cannot fix. |
+| Confirm the boot log shows a non-zero knowledge base | `Knowledge base: N course(s) …`. An empty one is a valid-looking prompt with no facts in it: every reply becomes "a representative will contact you". The boot ping and `/health` both flag it. |
 | Confirm the boot message arrives in Telegram | It reports lead-capture/payment-alert status and any config warning. No message = the team's alerting path is broken. |
 | Check `MESSENGER_PAGE_TOKEN` is a **Page** token | The Conversations API refuses System User tokens (#190), and every alert then says `(নাম জানা যায়নি)` with no chat link. The boot self-check probes this. |
 | Restore one backup into a scratch database | A backup nobody has restored is not a backup. |
