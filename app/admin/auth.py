@@ -51,6 +51,41 @@ def csrf_token(session_value: str) -> str:
     return _sign(get_settings().session_secret, f"csrf:{session_value}".encode())
 
 
+# --- Login throttling --------------------------------------------------------
+# In-memory and per-IP: enough to make an online password grind pointless, cheap enough
+# to cost nothing. A restart forgives, which is the right bias — a locked-out admin during
+# an incident is worse than a few extra guesses.
+MAX_LOGIN_FAILURES = 8
+LOCKOUT_S = 15 * 60
+_login_failures: dict[str, list[float]] = {}
+
+
+def lockout_remaining_s(client_ip: str) -> int:
+    """Seconds until this IP may try again; 0 when it is free to log in."""
+    now = time.time()
+    recent = [t for t in _login_failures.get(client_ip, []) if now - t < LOCKOUT_S]
+    _login_failures[client_ip] = recent
+    if len(recent) < MAX_LOGIN_FAILURES:
+        return 0
+    return max(1, int(LOCKOUT_S - (now - recent[0])))
+
+
+def record_login_failure(client_ip: str) -> int:
+    now = time.time()
+    recent = [t for t in _login_failures.get(client_ip, []) if now - t < LOCKOUT_S]
+    recent.append(now)
+    _login_failures[client_ip] = recent
+    if len(_login_failures) > 5000:  # bound the map against a spray of forged IPs
+        cutoff = now - LOCKOUT_S
+        for ip in [k for k, v in _login_failures.items() if not v or v[-1] < cutoff]:
+            _login_failures.pop(ip, None)
+    return len(recent)
+
+
+def clear_login_failures(client_ip: str) -> None:
+    _login_failures.pop(client_ip, None)
+
+
 def accounts() -> list[dict[str, str]]:
     s = get_settings()
     users = [{"username": s.admin_username, "password": s.admin_password, "role": "admin"}]

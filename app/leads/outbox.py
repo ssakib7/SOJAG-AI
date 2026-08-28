@@ -22,7 +22,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select, update
 
 from app.db.engine import db_session
-from app.db.models import LeadRow, OutboxRow, PaymentClaimRow
+from app.db.models import LeadRow, NoticeRow, OutboxRow, PaymentClaimRow
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +36,13 @@ Sink = Callable[[dict[str, Any]], Awaitable[bool]]
 def _sinks() -> dict[str, dict[str, Sink]]:
     from app.leads import sinks
 
-    # Payment claims go to Telegram only: the Sheet's columns are lead-shaped, and the
-    # team needs these as an immediate ping, not a row to work through later.
+    # Payment claims and escalation notices go to Telegram only: the Sheet's columns are
+    # lead-shaped, and the team needs these as an immediate ping, not a row to work
+    # through later.
     return {
         "lead": {"sheet": sinks.send_to_sheet, "telegram": sinks.send_lead_to_telegram},
         "payment": {"telegram": sinks.send_payment_to_telegram},
+        "notice": {"telegram": sinks.send_notice_to_telegram},
     }
 
 
@@ -52,9 +54,11 @@ _delivering = False
 _wakeup: asyncio.Event | None = None
 
 
+_LEDGERS = {"lead": LeadRow, "payment": PaymentClaimRow, "notice": NoticeRow}
+
+
 def _ledger_row(kind: str, item_id: str, payload: dict[str, Any]):
-    cls = LeadRow if kind == "lead" else PaymentClaimRow
-    return cls(id=item_id, payload=payload)
+    return _LEDGERS[kind](id=item_id, payload=payload)
 
 
 async def enqueue(kind: str, payload: dict[str, Any]) -> str:
@@ -82,6 +86,10 @@ async def enqueue_lead(lead: dict[str, Any]) -> str:
 
 async def enqueue_payment(payment: dict[str, Any]) -> str:
     return await enqueue("payment", payment)
+
+
+async def enqueue_notice(notice: dict[str, Any]) -> str:
+    return await enqueue("notice", notice)
 
 
 async def deliver_due() -> None:
@@ -186,11 +194,18 @@ async def run_delivery_loop(stop: asyncio.Event) -> None:
     """Boot: reset stale backoffs, then sweep every 30s (or immediately on enqueue)."""
     global _wakeup
     _wakeup = asyncio.Event()
-    async with db_session() as db:
-        result = await db.execute(update(OutboxRow).where(OutboxRow.done.is_(False)).values(not_before=0))
-        await db.commit()
-    if result.rowcount:
-        log.info("Lead outbox: %d undelivered item(s) from before restart — retrying.", result.rowcount)
+    # Guarded: this ran outside any try/except, so a Postgres blip at exactly this moment
+    # killed the delivery task for the whole process lifetime — leads then queued forever
+    # and the only symptom was a /health 503 nobody was watching. A failure here is
+    # survivable: the sweep below picks the same rows up once their backoff expires.
+    try:
+        async with db_session() as db:
+            result = await db.execute(update(OutboxRow).where(OutboxRow.done.is_(False)).values(not_before=0))
+            await db.commit()
+        if result.rowcount:
+            log.info("Lead outbox: %d undelivered item(s) from before restart — retrying.", result.rowcount)
+    except Exception as err:
+        log.error("Outbox: could not reset stale backoffs at boot (delivery continues): %s", err)
 
     while not stop.is_set():
         try:

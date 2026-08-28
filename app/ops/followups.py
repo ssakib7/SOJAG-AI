@@ -14,7 +14,7 @@ import logging
 from app.config import get_settings
 from app.db import state
 from app.kb.defaults import FALLBACK_FOLLOWUP
-from app.ops import blocklist
+from app.ops import blocklist, publish
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +43,14 @@ async def _fire_after(sender_id: str, delay_s: float) -> None:
     session = state.sessions.get(sender_id)
     if session is None or session["lead"].get("captured"):
         return  # already have their details — no nudge needed
+    if session.get("closed"):
+        return  # force-stopped by the off-topic rule — we already said goodbye
     if blocklist.is_blocked(sender_id):
         return  # blocked after the timer was armed — stay silent
+    if not publish.is_published():
+        return  # bot unpublished after the timer was armed — a nudge is still a reply
+    if state.is_human_handling(sender_id):
+        return  # a colleague owns this conversation — do not chirp into it
     session["followup_sent"] = True
     # Refresh the idle window so a reply to the nudge keeps its conversation context.
     session["last_active"] = state.now_ms()
@@ -85,6 +91,7 @@ def restore() -> None:
         pending = (
             delay_ms > 0
             and not s.get("followup_sent")
+            and not s.get("closed")  # a force-stopped chat must not be nudged back to life
             and not (s.get("lead") or {}).get("captured")
             and now - s["last_active"] < FOLLOWUP_MAX_AGE_MS
         )

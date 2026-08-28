@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 DIGEST_TZ = ZoneInfo("Asia/Dhaka")
 _boot_time = time.time()
 _last_digest_date: str | None = None  # in-memory: a restart may repeat one digest; harmless
+_digest_failures: dict[str, int] = {}
+MAX_DIGEST_ATTEMPTS = 10
 
 
 def _dhaka_clock() -> tuple[str, str]:
@@ -58,11 +60,22 @@ async def run_digest_loop(stop: asyncio.Event) -> None:
         # ">=" rather than "==" so a busy minute (or a restart shortly after digest time)
         # still produces that day's report, just late.
         if now >= digest_time and _last_digest_date != date:
-            _last_digest_date = date  # set first so a send failure doesn't spam every minute
             try:
                 await send_daily_digest()
+                _last_digest_date = date  # only once it has actually been delivered
             except Exception as err:
-                log.error("Daily digest failed: %s", err)
+                # Marking the day done before sending meant one Telegram blip at 21:00
+                # skipped the report entirely — and a missing digest is exactly how the
+                # team is supposed to notice the bot is dead. Retry on the next tick, but
+                # give up after a few so a hard outage doesn't retry all night.
+                _digest_failures[date] = _digest_failures.get(date, 0) + 1
+                if _digest_failures[date] >= MAX_DIGEST_ATTEMPTS:
+                    _last_digest_date = date
+                    log.error("Daily digest failed %d times — giving up for %s: %s",
+                              _digest_failures[date], date, err)
+                else:
+                    log.error("Daily digest failed (attempt %d), retrying next minute: %s",
+                              _digest_failures[date], err)
         try:
             await asyncio.wait_for(stop.wait(), 60)
         except asyncio.TimeoutError:

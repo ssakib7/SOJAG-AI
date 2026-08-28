@@ -44,24 +44,44 @@ async def block_sender(sender_id: object, name: str = "", note: str = "") -> boo
         "blocked_at": _blocked.get(sid, {}).get("blocked_at") or datetime.now(timezone.utc).isoformat(),
     }
     _blocked[sid] = entry
-    async with db_session() as db:
-        await db.merge(BlockRow(sender_id=sid, name=entry["name"], note=entry["note"],
-                                blocked_at=entry["blocked_at"]))
-        await db.commit()
+    try:
+        async with db_session() as db:
+            await db.merge(BlockRow(sender_id=sid, name=entry["name"], note=entry["note"],
+                                    blocked_at=entry["blocked_at"]))
+            await db.commit()
+    except Exception:
+        # Memory was updated first so the block takes effect immediately; if the durable
+        # write fails the block would silently vanish on the next restart. Roll memory
+        # back instead, so the caller sees a real failure rather than a block that only
+        # exists until the next redeploy.
+        _blocked.pop(sid, None)
+        log.error("⚠ Block NOT persisted for %s — rolled back so it cannot silently expire.", sid)
+        raise
     from app.db import state
 
     state.drop_session(sid)
+    # Forget the off-topic tally too, so a later Unblock is a genuinely clean slate.
+    state.off_topic_closes.pop(sid, None)
     return True
 
 
 async def unblock_sender(sender_id: object) -> bool:
     sid = str(sender_id or "").strip()
-    removed = _blocked.pop(sid, None) is not None
-    if removed:
+    entry = _blocked.pop(sid, None)
+    if entry is None:
+        return False
+    try:
         async with db_session() as db:
             await db.execute(delete(BlockRow).where(BlockRow.sender_id == sid))
             await db.commit()
-    return removed
+    except Exception:
+        # Same reasoning as block_sender, inverted: an unblock that isn't persisted comes
+        # back at the next restart, silently muting a customer an admin deliberately let
+        # back in. Restore the entry so the admin sees the failure now.
+        _blocked[sid] = entry
+        log.error("⚠ Unblock NOT persisted for %s — rolled back; the sender is still blocked.", sid)
+        raise
+    return True
 
 
 def list_blocked() -> list[dict[str, Any]]:

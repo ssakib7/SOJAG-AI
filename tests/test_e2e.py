@@ -112,8 +112,10 @@ class StubHandler(BaseHTTPRequestHandler):
                 "note": "ভর্তি নিশ্চিত হয়েছে কিনা জানতে চান",
                 "trx_id": "8N7A2B3C4D", "method": "bKash", "amount": "22000",
             })
+        system = next((m.get("content") for m in messages if m.get("role") == "system"), None)
+
         if not payment_scenario and "save_lead" in tool_names and not has_tool_result:
-            StubHandler.log.append({"kind": "llm", "role": "member-toolcall"})
+            StubHandler.log.append({"kind": "llm", "role": "member-toolcall", "system": system})
             return tool_call("save_lead", {
                 # The model "mangles" the number (drops a digit) — the pipeline must
                 # prefer the digits the customer actually typed.
@@ -121,7 +123,8 @@ class StubHandler(BaseHTTPRequestHandler):
                 "interest": "Bar Council কোর্স", "remarks": "দ্রুত ভর্তি হতে চান",
             })
         StubHandler.log.append({"kind": "llm", "role": "member-final", "has_tool_result": has_tool_result,
-                                "tools": tool_names, "payment_scenario": payment_scenario})
+                                "tools": tool_names, "payment_scenario": payment_scenario,
+                                "system": system})
         return completion({"role": "assistant",
                            "content": "ধন্যবাদ স্যার! আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করবেন।"}, "stop")
 
@@ -204,6 +207,25 @@ def test_full_lead_capture_flow(e2e_client):
     roles = [entry["role"] for entry in StubHandler.log if entry["kind"] == "llm"]
     assert "leader" in roles, "team leader never ran"
     assert "member-toolcall" in roles, "sales member never called save_lead"
+
+    # Prompt caching, verified on the wire rather than on our own string building: the
+    # member's system message must reach OpenRouter as [cached persona+KB, uncached tail].
+    # Unit tests can only prove what we hand Agno — this proves what Agno emits.
+    from app.agents.model import CACHE_BREAK
+
+    member_systems = [e["system"] for e in StubHandler.log
+                      if e["kind"] == "llm" and e["role"].startswith("member")]
+    assert member_systems, "no member call reached the LLM stub"
+    for system in member_systems:
+        assert isinstance(system, list) and len(system) == 2, f"not split: {system!r:.200}"
+        head, tail = system
+        assert head["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in tail
+        assert "=== KNOWLEDGE BASE ===" in head["text"], "the KB must be inside the cached half"
+        assert "<your_role>" in tail["text"], "the per-member half must be outside it"
+        assert CACHE_BREAK not in head["text"] + tail["text"]
+    # Every member call sends the identical cached prefix — that is the whole point.
+    assert len({s[0]["text"] for s in member_systems}) == 1
 
     # Sheet delivery: the customer's TYPED number must win over the model's mangled copy.
     sheet_hits = [entry for entry in StubHandler.log if entry["kind"] == "sheet"]

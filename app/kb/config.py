@@ -42,10 +42,45 @@ async def get_config_value(key: str) -> dict[str, Any] | None:
         return await _get(db, key)
 
 
+BACKUP_PREFIX = "prev:"
+
+
 async def set_config_value(key: str, value: dict[str, Any]) -> None:
+    """Write a config value, keeping the PREVIOUS one under `prev:<key>`.
+
+    Every admin save is a full replace of the live knowledge base or system prompt, and a
+    truncated form post or a cleared page instantly becomes what the bot tells customers.
+    One slot of history turns that from "restore last night's database dump" into one
+    click, which is the difference between a five-minute and a next-day recovery.
+    """
     async with db_session() as db:
+        if not key.startswith(BACKUP_PREFIX):
+            previous = await _get(db, key)
+            if previous is not None:
+                await db.merge(ConfigRow(key=f"{BACKUP_PREFIX}{key}", value=previous))
         await db.merge(ConfigRow(key=key, value=value))
         await db.commit()
+
+
+async def restore_previous(key: str) -> bool:
+    """Swap a config value back to the version before the last save. Returns False when
+    there is nothing to restore."""
+    async with db_session() as db:
+        previous = await _get(db, f"{BACKUP_PREFIX}{key}")
+        if previous is None:
+            return False
+        current = await _get(db, key)
+        await db.merge(ConfigRow(key=key, value=previous))
+        # Keep the undone version in the slot so the restore itself can be undone.
+        if current is not None:
+            await db.merge(ConfigRow(key=f"{BACKUP_PREFIX}{key}", value=current))
+        await db.commit()
+    await reload()
+    return True
+
+
+async def has_previous(key: str) -> bool:
+    return (await get_config_value(f"{BACKUP_PREFIX}{key}")) is not None
 
 
 def _text_of(value: dict[str, Any] | None) -> str:

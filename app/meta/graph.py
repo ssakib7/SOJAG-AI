@@ -13,8 +13,10 @@ Hard-won rules preserved from the Node bot:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -72,41 +74,103 @@ async def send_action(recipient_id: str, action: str) -> None:
         log.error("Sender action request failed: %s", err)
 
 
-async def send_message(recipient_id: str, text: str) -> None:
+async def send_message(recipient_id: str, text: str) -> bool:
+    """Send a reply, split into Messenger-sized chunks. Returns True only if EVERY
+    chunk was accepted by Meta.
+
+    The return value is load-bearing: the caller commits the turn to history only for
+    a delivered reply. A swallowed failure used to mean the customer got silence while
+    the bot's own history claimed it had answered, so every later turn argued with a
+    message that was never seen.
+    """
     if get_settings().shadow_mode:
         log.info("[shadow] → [%s] %s", recipient_id, text[:200])
         await _record_shadow(recipient_id, "message", text)
-        return
+        return True
     chunks = split_for_messenger(text)
     if len(chunks) > 1:
         log.info("Reply over 2000 chars — sending as %d messages.", len(chunks))
-    for chunk in chunks:
-        await _send_one(recipient_id, chunk)
+    for index, chunk in enumerate(chunks):
+        if not await _send_one(recipient_id, chunk):
+            # Stop at the first failed chunk: half an answer followed by its tail
+            # reads worse than a retry of the whole reply.
+            if index:
+                log.error("[%s] chunk %d of %d failed — abandoning the rest of the reply",
+                          recipient_id, index + 1, len(chunks))
+            return False
+    return True
 
 
-async def _send_one(recipient_id: str, text: str) -> None:
+# Send retries. Meta rate-limits (#613) and 5xx-es under exactly the bursts an ad
+# campaign produces; one immediate retry is not enough and an unbounded one would pile
+# turns up behind a hard outage.
+SEND_ATTEMPTS = 3
+SEND_RETRY_BASE_S = 1.0
+
+
+def _is_transient_send(status: int | None, body: str) -> bool:
+    """4xx that we should NOT retry: bad recipient, outside the 24h window, policy
+    violations — retrying those just burns quota. 429/5xx and transport errors are
+    worth another attempt."""
+    if status is None:
+        return True  # transport-level failure (timeout, connection reset)
+    if status == 429 or status >= 500:
+        return True
+    return "#613" in body or "rate limit" in body.lower() or "please retry" in body.lower()
+
+
+async def _post_send(url: str, params: dict[str, Any], payload: dict[str, Any]) -> tuple[int | None, str]:
+    try:
+        res = await client().post(url, params=params, json=payload)
+        return res.status_code, res.text
+    except Exception as err:
+        return None, f"{type(err).__name__}: {err}"
+
+
+async def _send_one(recipient_id: str, text: str) -> bool:
+    """One chunk, with retries. True = Meta accepted it."""
     s = get_settings()
     payload: dict[str, Any] = {"recipient": {"id": recipient_id}, "message": {"text": text}}
     persona_id = s.persona_id.strip()
     if persona_id:
         payload["persona_id"] = persona_id
-    try:
-        url = f"{s.graph_api_base}/{s.send_target}/messages"
-        params = {"access_token": s.page_access_token}
-        res = await client().post(url, params=params, json=payload)
-        if res.status_code >= 400:
-            body = res.text
-            log.error("Send API error: %s %s", res.status_code, body[:300])
-            # A bad/deleted persona id would silence the bot entirely — retry once
-            # without it so the customer still gets their reply.
-            if persona_id and "persona" in body.lower():
-                log.error("Retrying without persona_id — check PERSONA_ID in .env")
-                payload.pop("persona_id", None)
-                retry = await client().post(url, params=params, json=payload)
-                if retry.status_code >= 400:
-                    log.error("Send API error (retry): %s %s", retry.status_code, retry.text[:300])
-    except Exception as err:
-        log.error("Send API request failed: %s", err)
+    url = f"{s.graph_api_base}/{s.send_target}/messages"
+    params = {"access_token": s.page_access_token}
+
+    for attempt in range(1, SEND_ATTEMPTS + 1):
+        status, body = await _post_send(url, params, payload)
+        if status is not None and status < 400:
+            record_send_result(True)
+            return True
+
+        log.error("Send API error (attempt %d/%d): %s %s", attempt, SEND_ATTEMPTS, status, body[:300])
+        # A bad/deleted persona id would silence the bot entirely — drop it and retry
+        # immediately so the customer still gets their reply.
+        if persona_id and "persona" in body.lower() and "persona_id" in payload:
+            log.error("Retrying without persona_id — check PERSONA_ID in .env")
+            payload.pop("persona_id", None)
+            continue
+        if attempt == SEND_ATTEMPTS or not _is_transient_send(status, body):
+            break
+        await asyncio.sleep(SEND_RETRY_BASE_S * 2 ** (attempt - 1))
+
+    record_send_result(False)
+    log.error("⚠ [%s] REPLY NOT DELIVERED after %d attempt(s) — customer got nothing: %s",
+              recipient_id, SEND_ATTEMPTS, text[:120])
+    return False
+
+
+# --- Send health, surfaced on /health so an outage is visible without reading logs ---
+send_stats: dict[str, Any] = {"failed_since_boot": 0, "consecutive_failures": 0, "last_failure": None}
+
+
+def record_send_result(ok: bool) -> None:
+    if ok:
+        send_stats["consecutive_failures"] = 0
+        return
+    send_stats["failed_since_boot"] += 1
+    send_stats["consecutive_failures"] += 1
+    send_stats["last_failure"] = datetime.now(timezone.utc).isoformat()
 
 
 # --- Profile lookup ---------------------------------------------------------
@@ -114,6 +178,10 @@ async def _send_one(recipient_id: str, text: str) -> None:
 # lifetime; failures only PROFILE_RETRY_MS.
 _profiles: dict[str, dict[str, Any]] = {}
 PROFILE_RETRY_MS = 10 * 60 * 1000
+# Bounded: one entry per customer for the process lifetime is a slow leak on a bot that
+# runs for months across several ad campaigns. Oldest lookups are evicted first; an
+# evicted customer simply costs one more Graph call the next time they write.
+PROFILES_MAX = 5000
 _lookup_warned = False
 
 
@@ -178,9 +246,37 @@ async def fetch_profile(sender_id: str) -> dict[str, Any]:
     if cached and "gender_guess" in cached:
         entry["gender_guess"] = cached["gender_guess"]
     _profiles[sender_id] = entry
+    if len(_profiles) > PROFILES_MAX:
+        oldest = min(_profiles, key=lambda k: _profiles[k].get("at", 0))
+        _profiles.pop(oldest, None)
     if name:
         state.record_recent_name(sender_id, name)
     return entry
+
+
+async def check_lookup_token() -> bool:
+    """Boot probe: can we actually call the Conversations API with the token we have?
+
+    Every Telegram/Sheet alert's customer name and chat link comes from this endpoint. A
+    System User token is refused here with #190, and the failure was previously invisible
+    until someone wondered why every alert said the name was unknown.
+    """
+    s = get_settings()
+    if not s.fb_page_id:
+        return False
+    try:
+        res = await client().get(
+            f"{s.graph_api_base}/{s.fb_page_id}/conversations",
+            params={"fields": "id", "limit": 1, "access_token": s.lookup_token},
+            timeout=8.0,
+        )
+    except Exception as err:
+        log.warning("Lookup token probe failed: %s", err)
+        return False
+    if res.status_code < 400:
+        return True
+    log.warning("Lookup token probe rejected: %s %s", res.status_code, res.text[:200])
+    return False
 
 
 async def fetch_profile_name(sender_id: str) -> str | None:

@@ -92,6 +92,17 @@ class PaymentClaimRow(Base):
     payload: Mapped[dict] = mapped_column(JSONType, default=dict)
 
 
+class NoticeRow(Base):
+    """Append-only ledger of human-attention escalations (angry customer, unanswerable
+    question, human handoff request) — the third thing the bot can tell the team."""
+
+    __tablename__ = "notices"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    payload: Mapped[dict] = mapped_column(JSONType, default=dict)
+
+
 class OutboxRow(Base):
     """Pending sink deliveries with per-sink status and retry state.
 
@@ -102,7 +113,7 @@ class OutboxRow(Base):
     __tablename__ = "outbox_items"
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
-    kind: Mapped[str] = mapped_column(String(16))  # "lead" | "payment"
+    kind: Mapped[str] = mapped_column(String(16))  # "lead" | "payment" | "notice"
     at: Mapped[int] = mapped_column(BigInteger, default=0)  # epoch ms
     payload: Mapped[dict] = mapped_column(JSONType, default=dict)
     sinks: Mapped[dict] = mapped_column(JSONType, default=dict)  # name -> pending|sent|skipped

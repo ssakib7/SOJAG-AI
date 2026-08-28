@@ -27,7 +27,33 @@ persona-retry sends. That's where the production scar tissue lives; it ports 1:1
 ```sh
 cp .env.example .env       # fill in secrets
 docker compose up -d       # bot on 127.0.0.1:3006, Postgres on 127.0.0.1:5433
+sudo sh deploy/install.sh  # nightly backup + log rotation, then read its checklist
 ```
+
+**The bot runs as exactly one process.** Per-sender queues, webhook dedupe, sessions, the
+blocklist, follow-up timers and the prompt cache all live in its memory. A second replica
+or `--workers 2` would answer the same customer twice and interleave one customer's
+messages. Scale the single process, never the replica count.
+
+### Before pointing ads at it
+
+| Step | Why |
+|---|---|
+| Point an external monitor at `/health` (1–5 min) | It returns **503** when lead delivery is stuck, replies are not reaching Facebook, or the model is failing. Nothing else notices a broken bot. |
+| Confirm the boot message arrives in Telegram | It reports lead-capture/payment-alert status and any config warning. No message = the team's alerting path is broken. |
+| Check `MESSENGER_PAGE_TOKEN` is a **Page** token | The Conversations API refuses System User tokens (#190), and every alert then says `(নাম জানা যায়নি)` with no chat link. The boot self-check probes this. |
+| Restore one backup into a scratch database | A backup nobody has restored is not a backup. |
+| Review the knowledge base for stale dates | The bot quotes dates verbatim by design; nothing detects a batch that already started. |
+
+### Operating it
+
+- **A human replying from the Page inbox pauses the bot for that customer** (8h, refreshed
+  on each human reply) — Meta echoes those messages without an `app_id`, which is how the
+  bot tells a colleague's reply from its own. No handover configuration needed.
+- **The publish switch** in the admin panel silences the bot for everyone at the webhook
+  edge, without stopping the container — the right move during an incident.
+- **Undo** on the knowledge-base editor restores the previous saved version; a save that
+  would delete every course is refused outright.
 
 Local development:
 

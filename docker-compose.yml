@@ -2,6 +2,11 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    # EXACTLY ONE replica, always. Per-sender queues, webhook dedupe, sessions, the
+    # blocklist, follow-up timers and the prompt cache all live in this process's memory.
+    # A second replica would answer the same customer twice, interleave one customer's
+    # messages, and keep serving a stale prompt after an admin edit.
+    scale: 1
     env_file:
       - path: .env
         required: false  # secrets can also come from the environment (dev/CI)
@@ -14,11 +19,40 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      # Alerts `docker ps` (and any restart policy watcher) when lead delivery is stuck.
+      # /health returns 503 when lead delivery is stuck, replies are not reaching Facebook,
+      # or the model is failing — see app/webhook/routes.py. Read by `docker ps`, by the
+      # autoheal sidecar below, and (the one that matters) by the external uptime monitor.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3000/health', timeout=5).status==200 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3
+      start_period: 60s
+    labels:
+      autoheal: "true"
+    logging:
+      # Unbounded container logs fill the VPS disk, which takes Postgres down with it.
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  autoheal:
+    # `restart: unless-stopped` only reacts to a process that EXITS. A wedged-but-alive
+    # bot (dead event loop, exhausted pool) stays "up" forever while answering nobody.
+    # This restarts any container whose healthcheck has been failing.
+    image: willfarrell/autoheal:1.2.0
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "60"
+      AUTOHEAL_START_PERIOD: "120"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   db:
     image: pgvector/pgvector:pg16
@@ -37,6 +71,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 volumes:
   pgdata:

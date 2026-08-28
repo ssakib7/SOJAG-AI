@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from app.db.engine import db_session
-from app.db.models import DeletionRow
+from app.db.models import DeletionRow, LeadRow, NoticeRow, OutboxRow, PaymentClaimRow
 
 MAX_ENTRIES = 5000
 
@@ -65,6 +65,30 @@ async def record_deletion(user_id: object, purged: dict[str, Any]) -> str:
             await db.execute(delete(DeletionRow).where(DeletionRow.code.in_(codes)))
         await db.commit()
     return code
+
+
+async def purge_business_records(sender_id: str) -> dict[str, int]:
+    """Remove this person from the lead/payment/notice ledgers and the outbox.
+
+    state.purge_user_data only clears the conversation stores; name and phone also live in
+    the business ledgers, and leaving them there means a deletion request is not actually
+    honoured. Delivered rows in the team's Google Sheet are outside our reach and still
+    have to be cleared by hand — the callback logs a reminder for that.
+    """
+    from sqlalchemy import cast, String
+
+    counts: dict[str, int] = {}
+    async with db_session() as db:
+        for label, model in (("leads", LeadRow), ("payments", PaymentClaimRow),
+                             ("notices", NoticeRow), ("outbox", OutboxRow)):
+            # The payload is JSON in both Postgres and SQLite; match on its text form so
+            # this works without a dialect-specific JSON path operator.
+            result = await db.execute(
+                delete(model).where(cast(model.payload, String).contains(f'"{sender_id}"'))
+            )
+            counts[label] = result.rowcount or 0
+        await db.commit()
+    return counts
 
 
 async def find_deletion(code: object) -> dict[str, Any] | None:

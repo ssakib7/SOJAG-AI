@@ -12,7 +12,8 @@ serialized; ops/followups re-arms from last_active on boot):
     last_active: ms,                                       # painless migration from bot.db.json
     lead: {captured, name, asked, msg_count},
     followup_sent: bool, returning: bool, customer_name: str|None,
-    recent_mids: [{mid, text}], payments: [key], non_text_prompted_at: ms }
+    recent_mids: [{mid, text}], payments: [key], non_text_prompted_at: ms,
+    closed: bool }                                         # force-stopped by the off-topic rule
 """
 
 from __future__ import annotations
@@ -26,7 +27,30 @@ from app.config import get_settings
 from app.db.engine import db_session
 from app.db.models import CustomerRow, RecentRow, SessionRow
 
-SESSION_TTL_MS = 30 * 60 * 1000  # forget a conversation after 30 min idle
+# Forget a conversation after this much silence. Ad traffic is full of customers who ask
+# a price, go and think about it, and come back after dinner — 30 minutes threw away the
+# context (and the contact-ask counter) for exactly the leads worth keeping.
+SESSION_TTL_MS = 4 * 60 * 60 * 1000
+
+# How long the bot stays quiet after a colleague replies from the Page inbox. Long enough
+# to cover a real back-and-forth, short enough that a customer who returns tomorrow is
+# served instead of ignored. Refreshed on every further human reply.
+HUMAN_TAKEOVER_MS = 8 * 60 * 60 * 1000
+
+# How long a force-stop counts toward the auto-block. Without a window, three misfires
+# spread over three months would block a real customer as surely as three in ten minutes.
+OFF_TOPIC_CLOSE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+# senderId -> timestamps of recent force-stops. Each close expires with its session, so a
+# repeat offender is someone who came back and did it again. Deliberately in-memory and
+# never persisted: a restart forgives, which is the right bias for a heuristic that can
+# misfire on a real customer. Cleared once they are blocked.
+off_topic_closes: dict[str, list[int]] = {}
+
+
+def _recent_closes(sender_id: str) -> list[int]:
+    now = now_ms()
+    return [t for t in off_topic_closes.get(sender_id, []) if now - t < OFF_TOPIC_CLOSE_WINDOW_MS]
 MAX_HISTORY = 10  # last 10 messages (~5 exchanges) per customer
 RECENTS_TTL_MS = 7 * 24 * 60 * 60 * 1000
 RECENTS_MAX = 1000
@@ -90,6 +114,9 @@ def get_session(sender_id: str) -> dict[str, Any]:
         "recent_mids": [],
         "payments": [],
         "non_text_prompted_at": 0,
+        "closed": False,
+        "human_until": 0,
+        "notices": {},
     }
     sessions[sender_id] = fresh
     mark_session_dirty(sender_id)
@@ -103,6 +130,83 @@ def drop_session(sender_id: str) -> None:
     from app.ops import followups
 
     followups.cancel(sender_id)
+
+
+def pause_for_human(sender_id: str) -> None:
+    """A colleague replied from the Page inbox — hand the conversation to them.
+
+    Deliberately stamps the session directly rather than going through get_session, so a
+    human answering a customer the bot has never spoken to still silences the bot for the
+    rest of that exchange. Also cancels the follow-up nudge: nothing is worse than the bot
+    chirping "any other questions?" into a live human conversation.
+    """
+    session = sessions.get(sender_id)
+    if session is None:
+        session = get_session(sender_id)
+    previously = session.get("human_until") or 0
+    session["human_until"] = now_ms() + HUMAN_TAKEOVER_MS
+    session["last_active"] = now_ms()
+    mark_session_dirty(sender_id)
+    from app.ops import followups
+
+    followups.cancel(sender_id)
+    if not previously or previously < now_ms():
+        import logging
+
+        logging.getLogger(__name__).info(
+            "🧑 [%s] human replied from the Page inbox — bot paused for %dh",
+            sender_id, HUMAN_TAKEOVER_MS // 3_600_000,
+        )
+
+
+def is_human_handling(sender_id: str) -> bool:
+    session = sessions.get(sender_id)
+    if session is None:
+        return False
+    return now_ms() < (session.get("human_until") or 0)
+
+
+def resume_bot(sender_id: str) -> bool:
+    """Admin override: give the conversation back to the bot before the pause expires."""
+    session = sessions.get(sender_id)
+    if session is None or not session.get("human_until"):
+        return False
+    session["human_until"] = 0
+    mark_session_dirty(sender_id)
+    return True
+
+
+def is_closed(sender_id: str) -> bool:
+    """True while this conversation is force-stopped by the off-topic rule.
+
+    Read-only on purpose: it must not create a session or refresh last_active, so the
+    close expires with the session's normal 30-minute idle window. A customer who keeps
+    typing stays silenced; one who comes back later with a real course question gets a
+    fresh session and a real answer.
+    """
+    session = sessions.get(sender_id)
+    if session is None or not session.get("closed"):
+        return False
+    return now_ms() - session["last_active"] <= SESSION_TTL_MS
+
+
+def close_session(sender_id: str) -> int:
+    """Force-stop: every later message from this sender is dropped until the session
+    idles out. Also kills the pending follow-up nudge — we just told them goodbye.
+
+    Returns how many times this sender has been force-stopped inside the rolling
+    OFF_TOPIC_CLOSE_WINDOW_MS, so the caller can escalate a repeat offender to the blocklist.
+    """
+    session = sessions.get(sender_id)
+    if session is None:
+        return len(_recent_closes(sender_id))
+    session["closed"] = True
+    mark_session_dirty(sender_id)
+    from app.ops import followups
+
+    followups.cancel(sender_id)
+    off_topic_closes[sender_id] = [*_recent_closes(sender_id), now_ms()]
+    return len(off_topic_closes[sender_id])
 
 
 def remember_turn(session: dict[str, Any], user_text: str, reply_text: str) -> None:
@@ -171,7 +275,9 @@ def prune() -> None:
 
     now = now_ms()
     for sid in [s for s, v in sessions.items() if now - v["last_active"] > SESSION_TTL_MS]:
-        if not followups.is_pending(sid):
+        # Keep a session alive while a nudge is pending, or while a colleague still owns
+        # the conversation — dropping the latter would silently un-pause the bot.
+        if not followups.is_pending(sid) and now >= (sessions[sid].get("human_until") or 0):
             sessions.pop(sid, None)
             _deleted_sessions.add(sid)
             _dirty_sessions.discard(sid)

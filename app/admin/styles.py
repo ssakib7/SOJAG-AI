@@ -173,7 +173,28 @@ PAGE_STYLE = r"""
   /* Flash */
   .flash { display: flex; align-items: center; gap: 9px; background: var(--ok-bg);
     border: 1px solid rgba(79,214,160,.3); color: var(--ok); padding: 12px 14px; border-radius: 8px;
-    margin: 0 0 20px; font-size: 14px; }"""
+    margin: 0 0 20px; font-size: 14px; }
+  .flash-warn { background: rgba(245,130,30,.08); border-color: rgba(245,130,30,.35); color: var(--orange); }
+
+  /* Publish switch (sidebar) + the reminder banner it puts on every page */
+  .pub-card { margin-top: 18px; padding: 12px; border-radius: 10px; border: 1px solid rgba(79,214,160,.28);
+    background: var(--ok-bg); }
+  .pub-card.off { border-color: rgba(255,107,107,.32); background: rgba(255,107,107,.07); }
+  .pub-state { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700;
+    letter-spacing: .3px; text-transform: uppercase; color: var(--ok); }
+  .pub-card.off .pub-state { color: var(--red); }
+  .pub-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+    box-shadow: 0 0 0 3px rgba(79,214,160,.18); }
+  .pub-card.off .pub-dot { box-shadow: 0 0 0 3px rgba(255,107,107,.15); }
+  .pub-hint { font-size: 11.5px; color: var(--muted-2); margin: 6px 0 10px; line-height: 1.5; }
+  .pub-card form { margin: 0; }
+  .pub-card button { width: 100%; }
+  .btn-danger { background: rgba(255,107,107,.12); color: var(--red); border-color: rgba(255,107,107,.35); }
+  .btn-danger:hover { background: rgba(255,107,107,.2); border-color: var(--red); }
+  .offline-banner { border: 1px solid rgba(255,107,107,.3); background: rgba(255,107,107,.08);
+    color: var(--ink); padding: 13px 15px; border-radius: 9px; margin: 0 0 20px; font-size: 14px;
+    line-height: 1.6; }
+  .offline-banner strong { color: var(--red); }"""
 
 LOGIN_STYLE = r"""
   :root {

@@ -17,7 +17,7 @@ from app.db.engine import create_tables, dispose_engine
 from app.kb import config as kb_config
 from app.leads import outbox
 from app.meta import graph
-from app.ops import blocklist, digest, followups
+from app.ops import blocklist, digest, followups, publish
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -63,6 +63,46 @@ async def _name_resolve_loop(stop: asyncio.Event) -> None:
             break  # one lookup per tick
 
 
+async def _startup_selfcheck(settings) -> None:  # noqa: ANN001
+    """Prove the escalation path works, at boot, instead of the first time it is needed.
+
+    A silent Telegram misconfiguration (wrong chat id, revoked bot token, bot removed from
+    the group) is indistinguishable from "no alerts happened" until a payment claim goes
+    missing. One startup ping makes it obvious on day one, and doubles as a redeploy notice
+    for the team.
+    """
+    from app.leads import sinks
+    from app.meta import graph
+
+    if settings.shadow_mode or settings.selfcheck_disabled:
+        return
+    problems = settings.startup_warnings()
+    try:
+        ok = await sinks.send_telegram_text(
+            "✅ De Jure bot restarted and is listening.\n"
+            + ("Replies: PUBLISHED\n" if publish.is_published() else "⏸ Replies: UNPUBLISHED\n")
+            + f"Lead capture: {'on' if settings.leads_on else 'OFF'} · "
+            + f"Payment alerts: {'on' if settings.payments_on else 'OFF'}"
+            + ("\n\n⚠ " + "\n⚠ ".join(problems) if problems else "")
+        )
+        if not ok:
+            log.warning("⚠ Startup check: Telegram is not configured — escalations and payment "
+                        "claims will reach nobody.")
+    except Exception as err:
+        log.error("⚠ Startup check: Telegram is configured but UNREACHABLE (%s). Payment claims "
+                  "and escalations will queue in the outbox until this is fixed.", err)
+
+    # Prove the Conversations API works with the token we actually have, so alerts are
+    # known to carry customer names and clickable chat links (see MESSENGER_PAGE_TOKEN).
+    try:
+        probe = await graph.check_lookup_token()
+        if not probe:
+            log.warning("⚠ Startup check: customer-name lookup is NOT working — alerts will show "
+                        "'(নাম জানা যায়নি)' and no chat link. Set MESSENGER_PAGE_TOKEN to a PAGE token.")
+    except Exception as err:
+        log.warning("⚠ Startup check: could not verify the lookup token: %s", err)
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -70,6 +110,7 @@ async def lifespan(app: FastAPI):
 
     await create_tables()
     await blocklist.load()
+    await publish.load()
     await state.load()
     await kb_config.reload()
     followups.restore()
@@ -97,7 +138,17 @@ async def lifespan(app: FastAPI):
         if settings.memory_on
         else "PAUSED — no persistence, no customer recall (every chat starts fresh)",
     )
+    log.info("Replies: %s", "PUBLISHED" if publish.is_published()
+             else "UNPUBLISHED — the bot will not answer anyone until an admin publishes it")
     log.info("LLM: %s (%s)", settings.llm_provider, settings.llm_model)
+
+    # Misconfiguration that silently costs leads is worth shouting about — these used to
+    # be invisible until someone noticed the sheet had been empty for a week.
+    for warning in settings.startup_warnings():
+        log.warning("⚠ CONFIG: %s", warning)
+    # Tracked like every other background task so shutdown cancels it — an untracked
+    # probe can outlive the event loop and die noisily during teardown.
+    tasks.append(asyncio.create_task(_startup_selfcheck(settings)))
 
     try:
         yield

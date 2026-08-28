@@ -45,15 +45,23 @@ async def send_to_sheet(lead: dict[str, Any]) -> bool:
     return True
 
 
-async def send_telegram_text(text: str) -> bool:
-    """Post plain text to the team's Telegram chat. False = not configured."""
+async def send_telegram_text(text: str, html: bool = False) -> bool:
+    """Post to the team's Telegram chat. False = not configured.
+
+    html=True for the few messages that are composed with <b>/<code> markup — without
+    parse_mode Telegram renders the tags literally, which is how the auto-block notice
+    used to arrive with its unblock instructions wrapped in visible angle brackets.
+    """
     s = get_settings()
     if not (s.telegram_bot_token and s.telegram_chat_id):
         return False
+    payload: dict[str, Any] = {"chat_id": s.telegram_chat_id, "text": text}
+    if html:
+        payload["parse_mode"] = "HTML"
     async with httpx.AsyncClient(timeout=15.0) as client:
         res = await client.post(
             f"{s.telegram_api_base}/bot{s.telegram_bot_token}/sendMessage",
-            json={"chat_id": s.telegram_chat_id, "text": text},
+            json=payload,
         )
     if res.status_code >= 400:
         # Includes Telegram 429 rate limits — the outbox backoff spaces retries out.
@@ -72,6 +80,26 @@ async def send_lead_to_telegram(lead: dict[str, Any]) -> bool:
         + (f"\nOpen chat: {lead['conversationUrl']}" if lead.get("conversationUrl") else "")
     )
     return await send_telegram_text(text)
+
+
+async def send_notice_to_telegram(n: dict[str, Any]) -> bool:
+    """A conversation that needs a human — with enough context to act on it directly
+    from the chat link, without reconstructing the thread first."""
+    lines = [
+        f"{n.get('label') or '📣 মানুষের হস্তক্ষেপ প্রয়োজন'}",
+        f"Name: {n.get('name') or '(unknown)'}",
+    ]
+    if n.get("phone"):
+        lines.append(f"Phone: {n['phone']}")
+    if n.get("reason"):
+        lines.append(f"Why: {n['reason']}")
+    if n.get("customerMessage"):
+        lines.append(f'Customer wrote: "{n["customerMessage"]}"')
+    lines.append(f"Time: {n.get('time')}")
+    if n.get("conversationUrl"):
+        lines.append(f"Open chat: {n['conversationUrl']}")
+    lines.append("↩ Reply from the Page inbox — the bot pauses itself for this customer once you do.")
+    return await send_telegram_text("\n".join(lines))
 
 
 async def send_payment_to_telegram(p: dict[str, Any]) -> bool:

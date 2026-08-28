@@ -1,0 +1,9 @@
+# Local-only overrides (auto-loaded by docker compose; not for the VPS).
+# estateeye-postgres already publishes 127.0.0.1:5433 on this machine, so the db's
+# host port is moved here. !override replaces the base list — without it Compose
+# MERGES port lists and still tries to bind 5433. The bot is unaffected either way:
+# it reaches Postgres over the compose network at db:5432, never the host publish.
+services:
+  db:
+    ports: !override
+      - "127.0.0.1:5435:5432"

@@ -1,4 +1,4 @@
-"""Customer-facing tools for the team members: save_lead and report_payment.
+"""Customer-facing tools for the team members: save_lead, report_payment, end_conversation.
 
 Ported semantics from server.js askLLM():
 - save_lead: the number the customer actually TYPED (offered_phone) beats the model's
@@ -7,6 +7,9 @@ Ported semantics from server.js askLLM():
 - report_payment: every call is audited by a separate verifier model before the team is
   alerted (fail-open when the verifier is unreachable). Overruled reports return a
   rejection the model must act on ("do NOT tell the customer anything reached us").
+- end_conversation: the off-topic force-stop. An explicit call, not a sentence we fish out
+  of the reply text — string-matching prose meant a translated or reworded closing line
+  silently failed to close anything, with no signal that it had.
 
 Tools only record intent on the TurnContext scratch; the pipeline performs the real
 side effects (outbox, Telegram) after the reply is sent — discarded drafts do nothing.
@@ -121,5 +124,81 @@ async def report_payment(
             "Tell the customer warmly that their payment information has reached us and a "
             "representative will confirm shortly. You must NOT say the payment is confirmed, "
             "received, or verified, and must NOT confirm their enrollment or seat."
+        ),
+    }
+
+
+def notify_team(category: str, reason: str) -> dict:
+    """Alert a human colleague that THIS conversation needs them. Call this whenever the
+    customer needs something you cannot finish yourself, so a real person picks the chat up
+    instead of the customer waiting on a promise. Call it as well as answering — never
+    instead of answering — and at most once per topic per conversation.
+
+    Call it when: the customer asks to speak to a person or says they don't want to talk to a
+    bot; they are angry, upset, or complaining about the academy; they ask something you
+    genuinely cannot answer from the knowledge base; they report a payment, account, login,
+    website or enrollment problem that needs manual fixing; they ask about a refund or a
+    money-back request; or they are clearly a serious buyer who should be called quickly.
+
+    Do NOT call it for ordinary questions you can answer from the knowledge base, for
+    personal legal matters or spam (use end_conversation), or merely because the customer
+    gave you their phone number (save_lead already tells the team about that).
+
+    Args:
+        category: One of: human_request, angry, unknown_answer, account_issue, refund,
+            high_value, other. Pick the closest.
+        reason: One or two short lines (Bengali) telling the colleague what this customer
+            needs and what has already been said, so they can take over without reading the
+            whole chat.
+    """
+    turn = get_turn()
+    clean_category = str(category or "").strip().lower().replace(" ", "_")
+    if clean_category not in ESCALATION_CATEGORIES:
+        clean_category = "other"
+    clean_reason = short_note(reason, 300)
+    log.info('notify_team: category="%s" reason="%s"', clean_category, clean_reason)
+    turn.notice = {"category": clean_category, "reason": clean_reason}
+    return {
+        "status": "team_notified",
+        "note": (
+            "A colleague has been alerted and will pick this conversation up. Tell the customer "
+            "warmly that a representative will contact them shortly, and keep helping with "
+            "anything you can answer. Do NOT promise a specific time, and do NOT say the problem "
+            "is solved, the payment is confirmed, or the refund is approved."
+        ),
+    }
+
+
+ESCALATION_CATEGORIES = {
+    "human_request", "angry", "unknown_answer", "account_issue", "refund", "high_value", "other",
+}
+
+
+def end_conversation(reason: str) -> dict:
+    """Close this conversation for good because the customer wants something De Jure Academy does
+    not do. Call this ONLY for messages with nothing to do with the academy: a personal legal
+    dispute of their own (land, family, a criminal case), a job or internship request, advertising,
+    spam or unsolicited links, or an unrelated subject. After this call every further message from
+    this customer is silently dropped, so use it only when there is plainly nothing here for them.
+
+    Do NOT call it for anything a representative could sell or explain: scholarships, discounts,
+    instalments, fee concessions and affordability are SALES questions. Do NOT call it for someone
+    merely off-topic-adjacent — general legal advice, drafting, homework, an opinion about another
+    institution — who should get a polite decline and a steer back to the academy instead. Never
+    mention this tool; simply send the standard closing line as your reply.
+
+    Args:
+        reason: One short line (Bengali) for our records: what this customer actually wanted, so a
+            colleague reviewing the closed chat can tell a genuine mistake from real spam.
+    """
+    turn = get_turn()
+    clean = short_note(reason, 200)
+    log.info('end_conversation: reason="%s"', clean)
+    turn.end_conversation = clean or "(কারণ জানা যায়নি)"
+    return {
+        "status": "closed",
+        "note": (
+            "The conversation is closed. Reply with the standard closing line and nothing else — "
+            "no greeting, no apology, no offer to help further, no representative callback."
         ),
     }

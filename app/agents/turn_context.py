@@ -26,11 +26,14 @@ class TurnContext:
     ask_contact: bool = False          # deterministic contact-ask fires this turn
     offered_phone: str | None = None   # valid BD number the customer actually typed
     known_phone: str | None = None     # number already on file
+    images: list[Any] = field(default_factory=list)  # agno Images the customer sent this turn
 
     # Scratch: set by tools during the run, read by the pipeline after the send.
     lead: dict[str, Any] | None = None
     payment: dict[str, Any] | None = None
     lead_invalid: bool = False         # save_lead was called with an unusable phone
+    end_conversation: str | None = None  # off-topic force-stop, with the reason given
+    notice: dict[str, Any] | None = None  # notify_team: {category, reason}
 
     extras: dict[str, Any] = field(default_factory=dict)
 

@@ -193,6 +193,13 @@ SHELL = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="layout">
 {% if user %}{% include "sidebar" %}{% endif %}
 <main class="main">
+{% if user %}
+  {% if bot_flash == "published" %}<div class="flash">Bot published. It is answering customers again.</div>
+  {% elif bot_flash == "unpublished" %}<div class="flash flash-warn">Bot unpublished. It will not reply to anyone until you publish it again.</div>{% endif %}
+  {% if not published %}<div class="offline-banner"><strong>The bot is unpublished.</strong>
+    Every message from a customer is ignored — no replies, no follow-up nudges. Answer from the Page inbox
+    until an administrator publishes it again.</div>{% endif %}
+{% endif %}
 {% block content %}{% endblock %}
 </main>
 </div>
@@ -230,6 +237,20 @@ SIDEBAR = """<aside class="sidebar">
     {% if role == "admin" %}<a href="{{ base }}sec-enroll">Enrollment</a>{% endif %}
     <a href="{{ base }}sec-custom">Custom sections</a>
   </nav>
+  {% if role == "admin" %}
+  <div class="pub-card{% if not published %} off{% endif %}">
+    <div class="pub-state"><span class="pub-dot"></span>{% if published %}Published{% else %}Unpublished{% endif %}</div>
+    <div class="pub-hint">{% if published %}The bot is answering customers.{% else %}The bot is replying to nobody.{% endif %}</div>
+    <form method="post" action="/publish"
+          {% if published %}onsubmit="return confirm('Unpublish the bot? It will stop replying to every customer until you publish it again.')"{% endif %}>
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <input type="hidden" name="next" value="{{ path or '/' }}">
+      <input type="hidden" name="published" value="{% if published %}0{% else %}1{% endif %}">
+      <button type="submit" class="{% if published %}btn-danger{% else %}btn-primary{% endif %}">
+        {% if published %}Unpublish{% else %}Publish{% endif %}</button>
+    </form>
+  </div>
+  {% endif %}
   <div class="nav-foot">
     {% if user %}<div class="who">{{ user }} · {% if role == "admin" %}Admin{% else %}Courses &amp; products{% endif %}</div>{% endif %}
     <form method="post" action="/logout">

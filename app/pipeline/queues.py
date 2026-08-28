@@ -10,11 +10,13 @@ answering stale snapshots. Non-text events are handled one at a time, in arrival
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import OrderedDict
 from typing import Any
 
-from app.ops import blocklist
+from app.db import state
+from app.ops import blocklist, publish
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +58,18 @@ def is_text_event(event: dict[str, Any]) -> bool:
     )
 
 
+def is_human_takeover(event: dict[str, Any]) -> bool:
+    """True when a COLLEAGUE just replied to this customer from the Page inbox.
+
+    Meta echoes every outbound message back to us. Our own sends carry the app_id of the
+    app that sent them; a message a human typed in the Page inbox / Business Suite has no
+    app_id. That difference is the only signal we get that a person has taken the
+    conversation over — without it the bot cheerfully talks over its own colleagues.
+    """
+    message = event.get("message") or {}
+    return bool(message.get("is_echo")) and not message.get("app_id")
+
+
 def enqueue_event(event: dict[str, Any]) -> None:
     sender_id = (event.get("sender") or {}).get("id")
     # Blocked senders are dropped here, at the very edge — no session, no profile
@@ -67,22 +81,75 @@ def enqueue_event(event: dict[str, Any]) -> None:
         mid = (event.get("message") or {}).get("mid") or (event.get("message_edit") or {}).get("mid")
         log.info("duplicate webhook delivery ignored (%s)", mid)
         return
+
+    # Echoes: on an echo the "sender" is the PAGE and the customer is the recipient.
+    if (event.get("message") or {}).get("is_echo"):
+        if is_human_takeover(event):
+            customer_id = (event.get("recipient") or {}).get("id")
+            if customer_id:
+                state.pause_for_human(customer_id)
+        return
+
+    # The switch is off in the admin panel: the bot answers nobody. Dropped here, at the
+    # same edge as a blocked sender, so an unpublished bot costs one log line per event.
+    # The roster is still updated — staff need to see who wrote in while it was off.
+    if not publish.is_published():
+        if sender_id:
+            state.record_recent(sender_id, _preview_text(event))
+        log.info("⏸ [%s] bot is unpublished — event dropped", sender_id or "unknown sender")
+        return
+
     if not sender_id:
         _spawn(_handle_direct(event))
         return
+
+    # A colleague is handling this customer by hand — stay out of the way, but keep the
+    # roster current so the admin panel still shows the conversation moving.
+    if state.is_human_handling(sender_id):
+        log.info("🧑 [%s] a human is handling this conversation — bot staying silent", sender_id)
+        state.record_recent(sender_id, _preview_text(event))
+        return
+
     inbox = _inboxes.get(sender_id)
     if inbox is None:
         inbox = {"queue": [], "running": False}
         _inboxes[sender_id] = inbox
     inbox["queue"].append(event)
+    # Claim the loop SYNCHRONOUSLY, before awaiting anything. Meta delivers a burst of
+    # bubbles in one webhook POST, and enqueueing them back to back used to let the
+    # second call see running=False (the first loop task had not been scheduled yet) and
+    # spawn a second loop for the same customer — two concurrent turns, out-of-order
+    # replies, and a regeneration loop that could not see the other's messages.
     if not inbox["running"]:
+        inbox["running"] = True
         _spawn(_run_sender_loop(sender_id, inbox))
+
+
+def _preview_text(event: dict[str, Any]) -> str:
+    message = event.get("message") or {}
+    edit = event.get("message_edit") or {}
+    return message.get("text") or edit.get("text") or "(attachment)"
 
 
 def _spawn(coro) -> None:
     task = asyncio.get_running_loop().create_task(coro)
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
+
+
+async def _rescue_failed_batch(sender_id: str, err: Exception) -> None:
+    """Last resort when a turn blew up after the customer's messages were consumed."""
+    from app.kb.defaults import FALLBACK_ERROR
+    from app.meta import graph
+    from app.ops import escalate
+
+    with contextlib.suppress(Exception):
+        await graph.send_message(sender_id, FALLBACK_ERROR)
+    with contextlib.suppress(Exception):
+        await escalate.notify_team(
+            sender_id, state.sessions.get(sender_id), "other",
+            f"বট এই বার্তাটি প্রক্রিয়া করতে ব্যর্থ হয়েছে ({type(err).__name__}) — গ্রাহককে সরাসরি উত্তর দিন।",
+        )
 
 
 async def _handle_direct(event: dict[str, Any]) -> None:
@@ -97,7 +164,7 @@ async def _handle_direct(event: dict[str, Any]) -> None:
 async def _run_sender_loop(sender_id: str, inbox: dict[str, Any]) -> None:
     from app.pipeline import turn
 
-    inbox["running"] = True
+    inbox["running"] = True  # already claimed by enqueue_event; kept for direct callers
     try:
         while inbox["queue"]:
             # Blocked mid-conversation (admin clicked Block while messages were queued):
@@ -106,11 +173,35 @@ async def _run_sender_loop(sender_id: str, inbox: dict[str, Any]) -> None:
                 log.info("⛔ [%s] blocked mid-queue — dropping %d pending event(s)", sender_id, len(inbox["queue"]))
                 inbox["queue"].clear()
                 break
+            # Unpublished mid-queue (admin switched the bot off while messages waited):
+            # go silent immediately, exactly like a mid-queue block.
+            if not publish.is_published():
+                log.info("⏸ [%s] unpublished mid-queue — dropping %d pending event(s)",
+                         sender_id, len(inbox["queue"]))
+                inbox["queue"].clear()
+                break
+            # Force-stopped by the off-topic rule: the closing reply has already gone out,
+            # so everything after it is dropped in silence — no reply, no fallback, no
+            # typing bubble. Clears itself when the session idles out (state.is_closed).
+            if state.is_closed(sender_id):
+                log.info("🚫 [%s] conversation closed — dropping %d pending event(s)", sender_id, len(inbox["queue"]))
+                inbox["queue"].clear()
+                break
+            # A colleague picked the chat up while messages were queued.
+            if state.is_human_handling(sender_id):
+                log.info("🧑 [%s] human took over mid-queue — dropping %d pending event(s)",
+                         sender_id, len(inbox["queue"]))
+                inbox["queue"].clear()
+                break
             if is_text_event(inbox["queue"][0]):
                 try:
                     await turn.handle_text_batch(sender_id, inbox)
                 except Exception as err:
+                    # The customer's messages have already been drained: without a reply
+                    # here they get silence and nobody knows. Say something, and page the
+                    # team so a person can finish the conversation.
                     log.exception("Error handling batch: %s", err)
+                    await _rescue_failed_batch(sender_id, err)
             else:
                 event = inbox["queue"].pop(0)
                 try:

@@ -15,4 +15,8 @@ USER bot
 
 ENV PATH="/srv/.venv/bin:$PATH"
 EXPOSE 3000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3000"]
+# ONE worker, deliberately. The per-sender queues, webhook dedupe, session store,
+# blocklist and follow-up timers are process-local; a second worker would double-reply to
+# redelivered webhooks and interleave one customer's messages. Scale by making the single
+# process faster, never by adding workers.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "1"]

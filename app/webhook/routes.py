@@ -27,6 +27,10 @@ router = APIRouter()
 
 _boot = time.time()
 OUTBOX_STUCK_MS = 30 * 60 * 1000
+# Consecutive failures before /health reports degraded. Small, because both of these mean
+# customers are actively getting nothing.
+SEND_FAILURE_ALERT = 5
+LLM_FAILURE_ALERT = 5
 
 _PAGES_DIR = Path(__file__).resolve().parent.parent / "pages"
 
@@ -119,9 +123,21 @@ async def data_deletion_callback(request: Request) -> Response:
     purged = state.purge_user_data(user_id)
     if purged["matched"]:
         await state.flush()
+    # Conversation state is only half of it: the name and phone also sit in the lead,
+    # payment, notice and outbox ledgers. Leaving those behind meant a deletion request
+    # was acknowledged but not actually carried out.
+    try:
+        ledger_counts = await deletion.purge_business_records(user_id)
+        if any(ledger_counts.values()):
+            purged["matched"] = True
+            purged["ledgers"] = True
+            log.info("Data deletion: removed ledger rows for %s — %s", user_id, ledger_counts)
+    except Exception as err:
+        log.error("Data deletion: ledger purge FAILED for %s — complete this by hand: %s", user_id, err)
     code = await deletion.record_deletion(user_id, purged)
     if purged["matched"]:
-        log.info("Data deletion [%s]: purged records for %s.", code, user_id)
+        log.info("Data deletion [%s]: purged records for %s. Any row already delivered to the "
+                 "Google Sheet must still be removed there by hand.", code, user_id)
     else:
         log.warning(
             "Data deletion [%s]: no local records matched %s — check the leads sheet and "
@@ -174,20 +190,50 @@ async def webhook_events(request: Request) -> Response:
 async def health() -> Response:
     """Built for an EXTERNAL uptime monitor — the bot must not be the only thing that
     knows the bot is broken. 503 when lead delivery is stuck. Counts only, no PII."""
+    from app.agents.model import llm_stats
+    from app.meta.graph import send_stats
+    from app.ops import publish
+
+    s = get_settings()
     stats = await outbox.get_outbox_stats()
-    stuck = stats["oldest_pending_ms"] > OUTBOX_STUCK_MS
+
+    # Three independent ways the bot can be useless while the process looks perfectly
+    # healthy: leads not draining, Meta refusing our replies, or the model down. An
+    # external uptime monitor watching only "does it return 200" must catch all three.
+    problems = []
+    if stats["oldest_pending_ms"] > OUTBOX_STUCK_MS:
+        problems.append("lead delivery stuck")
+    if send_stats["consecutive_failures"] >= SEND_FAILURE_ALERT:
+        problems.append("replies not reaching Facebook")
+    if llm_stats["consecutive_failures"] >= LLM_FAILURE_ALERT:
+        problems.append("AI model failing")
+    if not s.leads_on:
+        problems.append("lead capture disabled by config")
+
     return JSONResponse(
-        status_code=503 if stuck else 200,
+        status_code=503 if problems else 200,
         content={
-            "status": "degraded: lead delivery stuck" if stuck else "ok",
+            "status": "degraded: " + "; ".join(problems) if problems else "ok",
             "uptimeSec": round(time.time() - _boot),
-            "leadCapture": get_settings().leads_on,
+            "leadCapture": s.leads_on,
+            "paymentAlerts": s.payments_on,
+            "published": publish.is_published(),
             "outbox": {
                 "pending": stats["pending"],
                 "oldestPendingMin": round(stats["oldest_pending_ms"] / 60000),
                 "enqueuedSinceBoot": stats["enqueued_since_boot"],
                 "resolvedSinceBoot": stats["resolved_since_boot"],
                 "lastError": stats["last_error"],
+            },
+            "send": {
+                "failedSinceBoot": send_stats["failed_since_boot"],
+                "consecutiveFailures": send_stats["consecutive_failures"],
+                "lastFailure": send_stats["last_failure"],
+            },
+            "llm": {
+                "failedSinceBoot": llm_stats["failed_since_boot"],
+                "consecutiveFailures": llm_stats["consecutive_failures"],
+                "lastError": llm_stats["last_error"],
             },
         },
     )
