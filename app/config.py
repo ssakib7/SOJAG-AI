@@ -42,12 +42,20 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     openrouter_api_key: str = ""
     openrouter_api_base: str = ""    # test stub override; production leaves it unset
-    # Measured 12-28.5s per turn on gemini-3.x through the team (leader hop + member +
-    # sometimes the payment verifier). 30s was cutting off legitimate generations, which
-    # then retried, paid twice, and still fell back to the error line.
+    # Measured 12-28.5s per turn on gemini-3.x back when a routing hop ran ahead of the
+    # answer; a turn is one model call now (two when it uses a tool), so the ceiling has
+    # room to spare. 30s was cutting off legitimate generations, which then retried, paid
+    # twice, and still fell back to the error line.
     llm_timeout_seconds: int = 60
     llm_max_concurrent: int = 25
     # Bengali + Gemini 3.x thinking tokens share this budget; 1024 truncated replies.
+    #
+    # A CAP, not a spend: billing is per token produced, so raising it costs nothing and
+    # lowering it saves nothing — it only decides when the model gets cut off. Kept at 4096
+    # by the team's call. The one thing to watch: a thinking model that hits the cap while
+    # still reasoning returns NO text at all, which arrives as an empty reply rather than a
+    # truncated one. factory._empty_reply_diagnosis logs output tokens against this number
+    # on every empty reply, so if the cap is the cause it says so in one line.
     llm_max_tokens: int = 4096
 
     # --- Sinks ---

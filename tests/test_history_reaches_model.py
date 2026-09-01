@@ -1,14 +1,14 @@
-"""Does the routed member actually SEE the conversation so far?
+"""Does the model actually SEE the conversation so far?
 
-The system prompt now tells the model to read the history and to greet only in the first
-reply of a conversation. That instruction is worthless if the history never reaches the
-member: the bot would re-greet and re-introduce itself on every turn, which is exactly what
-customers were seeing.
+The system prompt tells the model to read the history and to greet only in the first reply
+of a conversation. That instruction is worthless if the history never arrives: the bot
+would re-greet and re-introduce itself on every turn, which is exactly what customers were
+seeing.
 
-The plumbing is not obvious. `run_turn` builds `[*history, user]` and hands it to a Team in
-route mode with `add_history_to_context=False`; the leader then delegates to one member.
-Whether the member receives the full list or just the delegated task is Agno's business,
-not ours — so this asserts it on the wire, against the same stub the e2e test uses.
+The plumbing is not obvious. Only THIS turn's words go on the input; the conversation
+reaches the model as a rendered transcript inside the system prompt, and Agno decides what
+of that actually goes on the wire. So this asserts it on the wire, against the same stub
+the e2e test uses, rather than trusting our own string building.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def seeded_session():
     state.sessions.pop(sender, None)
 
 
-def test_member_receives_the_conversation_so_far(e2e_client, seeded_session):  # noqa: F811
+def test_the_model_receives_the_conversation_so_far(e2e_client, seeded_session):  # noqa: F811
     payload = {"object": "page", "entry": [{"messaging": [{
         "sender": {"id": seeded_session},
         "message": {"mid": "m-hist-1", "text": "আর অফলাইনে?"},
@@ -67,26 +67,25 @@ def test_member_receives_the_conversation_so_far(e2e_client, seeded_session):  #
     }).status_code == 200
 
     deadline = time.time() + 60
-    member_calls = []
+    model_calls = []
     while time.time() < deadline:
-        member_calls = [e for e in StubHandler.log
-                        if e["kind"] == "llm" and e.get("role") == "member-final" and e.get("messages")]
-        if member_calls:
+        model_calls = [e for e in StubHandler.log
+                        if e["kind"] == "llm" and e.get("role") == "agent-final" and e.get("messages")]
+        if model_calls:
             break
         time.sleep(0.25)
 
-    assert member_calls, f"no member call reached the stub; log={StubHandler.log}"
-    # The whole request, system message included: route mode collapses the input list into
-    # one user turn and drops assistant replies, so the history reaches the member through
-    # the === CONVERSATION SO FAR === block in its system prompt instead.
-    flat = json.dumps(member_calls[-1]["messages"], ensure_ascii=False)
+    assert model_calls, f"no model call reached the stub; log={StubHandler.log}"
+    # The whole request, system message included: the input carries only this turn's words,
+    # so the history has to arrive through the === CONVERSATION SO FAR === block instead.
+    flat = json.dumps(model_calls[-1]["messages"], ensure_ascii=False)
 
     assert PRIOR_CUSTOMER in flat, (
-        "the customer's earlier message never reached the member — it cannot know this is "
+        "the customer's earlier message never reached the model — it cannot know this is "
         "not the first turn, so it will greet and re-introduce every time"
     )
     assert PRIOR_REPLY in flat, (
-        "our own earlier reply never reached the member — it cannot avoid repeating itself "
+        "our own earlier reply never reached the model — it cannot avoid repeating itself "
         "or re-asking for something already given"
     )
     assert "আর অফলাইনে?" in flat, "the current message must be there too"
@@ -111,10 +110,10 @@ def test_first_reply_carries_no_history_block(e2e_client):  # noqa: F811
     calls = []
     while time.time() < deadline:
         calls = [e for e in StubHandler.log
-                 if e["kind"] == "llm" and e.get("role") == "member-final" and e.get("messages")]
+                 if e["kind"] == "llm" and e.get("role") == "agent-final" and e.get("messages")]
         if calls:
             break
         time.sleep(0.25)
 
-    assert calls, "no member call reached the stub"
+    assert calls, "no model call reached the stub"
     assert "=== CONVERSATION SO FAR ===" not in json.dumps(calls[-1]["messages"], ensure_ascii=False)

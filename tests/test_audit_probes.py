@@ -63,6 +63,21 @@ def _graph_stub(monkeypatch, sent: list[str]):
     monkeypatch.setattr(graph, "resolve_inbox_url", fake_inbox_url)
 
 
+def _delivering_graph_stub(monkeypatch, sent: list[str]):
+    """_graph_stub's send returns None, i.e. NOT delivered — fine for tests that only
+    care what was written, wrong for tests about what enters history (nothing commits
+    unless the customer actually received the message)."""
+    from app.meta import graph
+
+    _graph_stub(monkeypatch, sent)
+
+    async def delivering_send(recipient_id, text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(graph, "send_message", delivering_send)
+
+
 def _text_event(sender: str, mid: str, text: str) -> dict:
     return {"sender": {"id": sender}, "message": {"mid": mid, "text": text}}
 
@@ -237,13 +252,13 @@ def test_repeated_claim_wording_does_not_realert(monkeypatch, leads_and_payments
 
 # ---------------------------------------------------------------------------
 # PROBE 5 — LLM total outage. The deterministic backstop must still capture a
-# typed phone number, and the customer must get the error fallback (not silence).
-# Expected to PASS — this is the safety net working.
+# typed phone number, and the customer must get SILENCE, not an apology: the
+# team is paged instead, because they are the only ones who can fix an outage.
 # ---------------------------------------------------------------------------
 def test_llm_outage_phone_backstop_still_captures(monkeypatch, leads_and_payments_on):
     from app.agents import factory
-    from app.kb.defaults import FALLBACK_ERROR
     from app.leads import outbox
+    from app.ops import escalate
     from app.pipeline import turn
 
     sent: list[str] = []
@@ -262,13 +277,26 @@ def test_llm_outage_phone_backstop_still_captures(monkeypatch, leads_and_payment
 
     monkeypatch.setattr(outbox, "enqueue_lead", fake_enqueue_lead)
 
+    reasons: list[str] = []
+
+    async def fake_notify(sender_id, session, category, reason, customer_message=""):
+        reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(escalate, "notify_team", fake_notify)
+
     inbox = {"queue": [_text_event("llm-u", "ml1", "Orko Rahman 01712345678")],
              "running": True}
     asyncio.run(turn.handle_text_batch("llm-u", inbox))
 
-    assert sent == [FALLBACK_ERROR]
+    assert sent == [], f"the customer was handed an apology for our outage: {sent}"
     assert len(leads) == 1 and leads[0]["phone"] == "01712345678", (
         "phone typed during LLM outage was not captured by the backstop"
+    )
+    assert reasons, "nobody was told the model is down"
+    assert "API key" in reasons[0], (
+        "the page must say this is an OUTAGE, not a content problem — the two need "
+        f"different people: {reasons[0]}"
     )
 
 
@@ -376,6 +404,122 @@ def test_bot_own_echo_does_not_pause_it(monkeypatch):
         "message": {"mid": "m-echo-2", "text": "ধন্যবাদ", "is_echo": True, "app_id": 1234567890},
     })
     assert not state.is_human_handling("cust-e")
+
+
+def test_our_own_echo_without_an_app_id_is_still_ours(monkeypatch):
+    """The app_id is Meta's field to omit, and an echo of OUR message read as a colleague
+    would silence the bot for eight hours. A mid we know we sent overrules the heuristic."""
+    from app.meta import graph
+    from app.pipeline import queues
+
+    graph._record_our_mid('{"recipient_id": "cust-m", "message_id": "m-ours-1"}')
+    assert graph.was_sent_by_us("m-ours-1")
+
+    queues.enqueue_event({
+        "sender": {"id": "page-1"},
+        "recipient": {"id": "cust-m"},
+        "message": {"mid": "m-ours-1", "text": "ধন্যবাদ", "is_echo": True},
+    })
+    assert not state.is_human_handling("cust-m"), (
+        "the bot mistook its own message for a colleague's and stood down"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A turn takes 15-35s (reading beat + model + humanized pause). The queue's
+# takeover checks all happen BEFORE a turn starts, so a colleague who replies
+# while one is in flight used to be talked over by a reply already composed.
+# The last moment it can be withdrawn is immediately before the send.
+# ---------------------------------------------------------------------------
+def test_reply_is_withheld_when_a_human_replies_mid_turn(monkeypatch, fast_replies):
+    from app.agents.turn_context import TurnContext
+    from app.pipeline import turn
+
+    sent: list[str] = []
+
+    async def _noop(*a, **kw):
+        return None
+
+    async def _model_turn(sender_id, session, text, *a, **kw):
+        # The colleague answers from the Page inbox while the model is still working.
+        state.pause_for_human(sender_id)
+        ctx = TurnContext(sender_id=sender_id, session=session, combined_text=text)
+        ctx.extras = {"text": "কোর্স ফি ২২,০০০ টাকা।", "commit": True}
+        return ctx
+
+    monkeypatch.setattr(turn.graph, "send_message", lambda sid, text: sent.append(text) or _noop())
+    monkeypatch.setattr(turn.graph, "send_action", _noop)
+    monkeypatch.setattr(turn, "_run_model_turn", _model_turn)
+    monkeypatch.setattr(turn, "_profile_with_gender", lambda sid: _noop())
+    monkeypatch.setattr(turn.followups, "schedule", lambda sid, session: None)
+    monkeypatch.setattr(turn, "_rand_between", lambda lo, hi: 0)
+
+    inbox = {"queue": [_text_event("mid-u", "m1", "কোর্স ফি কত?")], "running": True}
+    asyncio.run(turn.handle_text_batch("mid-u", inbox))
+
+    assert sent == [], "bot sent a reply it had already composed on top of a colleague's"
+    assert state.sessions["mid-u"]["history"] == [], (
+        "a withheld draft was committed to history as if the customer had seen it"
+    )
+
+
+def test_withheld_reply_still_captures_the_lead(monkeypatch, leads_and_payments_on):
+    """Standing down is about not talking over a person — not about throwing away a phone
+    number the customer already typed."""
+    from app.agents.turn_context import TurnContext
+    from app.pipeline import turn
+
+    captured: list[dict] = []
+
+    async def _noop(*a, **kw):
+        return None
+
+    async def _model_turn(sender_id, session, text, *a, **kw):
+        state.pause_for_human(sender_id)
+        ctx = TurnContext(sender_id=sender_id, session=session, combined_text=text)
+        ctx.extras = {"text": "ধন্যবাদ স্যার।", "commit": True}
+        return ctx
+
+    monkeypatch.setattr(turn.graph, "send_message", _noop)
+    monkeypatch.setattr(turn.graph, "send_action", _noop)
+    monkeypatch.setattr(turn, "_run_model_turn", _model_turn)
+    monkeypatch.setattr(turn, "_profile_with_gender", lambda sid: _noop())
+    monkeypatch.setattr(turn, "_best_name", lambda sid, session: _noop())
+    monkeypatch.setattr(turn, "capture_lead",
+                        lambda sid, session, lead: captured.append(lead) or _noop())
+    monkeypatch.setattr(turn.followups, "schedule", lambda sid, session: None)
+    monkeypatch.setattr(turn, "_rand_between", lambda lo, hi: 0)
+
+    inbox = {"queue": [_text_event("mid-l", "m1", "আমার নাম্বার ০১৭১২৩৪৫৬৭৮")], "running": True}
+    asyncio.run(turn.handle_text_batch("mid-l", inbox))
+
+    assert captured, "a phone number in hand was dropped because a colleague stepped in"
+    assert captured[0]["phone"].endswith("1712345678")
+
+
+def test_the_takeover_pause_never_outlives_the_conversation():
+    """prune() refuses to drop a paused session, so a pause longer than the session TTL
+    freezes a thread the bot has already forgotten. Keep the ordering pinned."""
+    assert state.HUMAN_TAKEOVER_MS < state.SESSION_TTL_MS, (
+        "the human-takeover pause outlasts the conversation it is protecting"
+    )
+
+
+def test_admin_can_hand_a_paused_conversation_back_to_the_bot():
+    """The pause is persisted, so without a release there is no way to undo it at all —
+    not even a restart."""
+    from app.pipeline import queues
+
+    queues.enqueue_event({
+        "sender": {"id": "page-1"},
+        "recipient": {"id": "cust-r"},
+        "message": {"mid": "m-echo-r", "text": "আমি দেখছি", "is_echo": True},
+    })
+    assert state.is_human_handling("cust-r")
+
+    assert state.resume_bot("cust-r") is True
+    assert not state.is_human_handling("cust-r"), "the bot was not given the conversation back"
+    assert state.resume_bot("cust-r") is False, "resuming an unpaused conversation reported success"
 
 
 # ---------------------------------------------------------------------------
@@ -509,17 +653,26 @@ def test_undelivered_reply_pages_the_team(monkeypatch, leads_and_payments_on):
 # An empty model reply is a failure the CUSTOMER sees. Observed live on
 # "I don't want to give my number, just get me a human" — the one message you
 # cannot afford to answer with an apology and no follow-up.
+#
+# The apology is now gone entirely: one retry, then silence plus a page to the
+# team. Customers were getting "দুঃখিত, একটি সমস্যা হয়েছে" two and three times in a
+# row under their own messages — a line that told them their message had failed
+# while giving them nothing to do about it.
 # ---------------------------------------------------------------------------
-def test_empty_model_reply_pages_the_team(monkeypatch, leads_and_payments_on):
+def test_empty_model_reply_retries_then_stays_silent_and_pages_the_team(
+    monkeypatch, leads_and_payments_on
+):
     from app.agents import factory
-    from app.kb.defaults import FALLBACK_EMPTY
     from app.ops import escalate
     from app.pipeline import turn
 
     sent: list[str] = []
     _graph_stub(monkeypatch, sent)
 
+    attempts: list[int] = []
+
     async def empty_run_turn(t):
+        attempts.append(t.attempt)
         return ""  # model produced no text and called no tool
 
     monkeypatch.setattr(factory, "run_turn", empty_run_turn)
@@ -536,8 +689,74 @@ def test_empty_model_reply_pages_the_team(monkeypatch, leads_and_payments_on):
              "running": True}
     asyncio.run(turn.handle_text_batch("empty-r", inbox))
 
-    assert sent == [FALLBACK_EMPTY]
-    assert escalations, "the customer got an apology and nobody was told"
+    assert sent == [], f"the customer must get nothing, not an apology — got {sent}"
+    assert attempts == [0, 1], f"expected one attempt then one retry, got {attempts}"
+    assert escalations, "the customer got nothing at all and nobody was told"
+    # Their words are still ours: the next turn — and the colleague picking this up —
+    # must be able to see what was asked.
+    assert state.sessions["empty-r"]["history"] == [
+        {"role": "user", "parts": [{"text": "শুধু একজন মানুষ ধরিয়ে দিন"}]}
+    ], "the unanswered message was dropped — the bot will ask for it all over again"
+
+
+def test_a_retry_that_succeeds_is_the_reply_the_customer_gets(monkeypatch, leads_and_payments_on):
+    """The whole point of the retry: one empty response must not cost the customer their
+    answer."""
+    from app.agents import factory
+    from app.pipeline import turn
+
+    sent: list[str] = []
+    _delivering_graph_stub(monkeypatch, sent)
+
+    async def flaky_run_turn(t):
+        return "ফি ৪,৫০০ টাকা।" if t.attempt else ""
+
+    monkeypatch.setattr(factory, "run_turn", flaky_run_turn)
+
+    inbox = {"queue": [_text_event("retry-r", "mr1", "ফি কত?")], "running": True}
+    asyncio.run(turn.handle_text_batch("retry-r", inbox))
+
+    assert sent == ["ফি ৪,৫০০ টাকা।"]
+    assert len(state.sessions["retry-r"]["history"]) == 2, "a delivered retry is a normal turn"
+
+
+def test_one_agent_answers_and_it_keeps_every_tool():
+    """The team's three members collapsed into one agent. Every tool the members carried
+    between them has to survive that: a lead or a payment claim rides on these, and the
+    pipeline's regex backstops only cover the two of them that have a regex."""
+    from app.agents import factory
+    from app.agents.tools import end_conversation, notify_team, report_payment, save_lead
+
+    agent = factory.build_agent()
+    assert agent.tools is factory._tools, "tools must resolve per run, not be frozen at build"
+    names = {t.__name__ for t in factory._tools()}
+    assert names == {f.__name__ for f in (end_conversation, notify_team, save_lead, report_payment)}
+
+
+def test_llm_error_keeps_the_customers_message(monkeypatch, leads_and_payments_on):
+    """A turn the model crashed on sends the customer nothing at all — but their own words
+    must survive it, or the next turn re-asks for details they already gave. This is what
+    the live chat showed: name, number and batch typed one after another, each answered
+    with a fallback, and every one of them forgotten."""
+    from app.agents import factory
+    from app.pipeline import turn
+
+    sent: list[str] = []
+    _delivering_graph_stub(monkeypatch, sent)
+
+    async def boom(t):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(factory, "run_turn", boom)
+
+    inbox = {"queue": [_text_event("err-r", "er1", "batch 19th bjs Alpha")],
+             "running": True}
+    asyncio.run(turn.handle_text_batch("err-r", inbox))
+
+    assert sent == []
+    assert state.sessions["err-r"]["history"] == [
+        {"role": "user", "parts": [{"text": "batch 19th bjs Alpha"}]}
+    ]
 
 
 def test_notice_without_text_gets_the_escalation_fallback(monkeypatch, leads_and_payments_on):

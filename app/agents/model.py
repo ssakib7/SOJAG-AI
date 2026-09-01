@@ -39,11 +39,26 @@ _semaphore: asyncio.Semaphore | None = None
 CACHE_BREAK = "<<<CACHE_BREAKPOINT>>>"
 CACHE_MIN_CHARS = 2000  # below this a cache write costs more than it saves (the routing hop)
 
-# The leader's routing hop is a single-word decision, but Gemini 3.x flash still spent ~260
-# reasoning tokens on it (billed at the OUTPUT rate). This is the OpenRouter equivalent of the
+# Single-decision calls (the name-gender classifier, and anything else that answers in one
+# word) do not need reasoning, but Gemini 3.x flash still spent ~260 reasoning tokens on one
+# unless told otherwise — billed at the OUTPUT rate. This is the OpenRouter equivalent of the
 # thinking_budget=0 used on the native Gemini path. "minimal" is the floor the model accepts —
 # reasoning {"enabled": false} and {"max_tokens": 0} are both rejected with a 400.
 FAST_REASONING = {"effort": "minimal"}
+
+# OpenRouter load-balances a model across every provider that hosts it, so a Gemini call can
+# land on a third-party host we have never tested — different quantisation, different tool-call
+# behaviour, different latency tail. Pin Gemini traffic to Google's own endpoints. Order is the
+# preference order OpenRouter walks: the flex lanes first (cheaper), each falling through to
+# the standard lane on the same backend.
+GEMINI_PROVIDER_ROUTING: dict[str, Any] = {
+    "only": [
+        "google-ai-studio/flex",
+        "google-ai-studio",
+        "google-vertex/global",
+        "google-vertex/global/flex",
+    ]
+}
 
 
 def _sem() -> asyncio.Semaphore:
@@ -112,18 +127,22 @@ def _sentinel_stripping_gemini_cls() -> Any:
 def build_model(model_id: str | None = None, *, fast: bool = False) -> Any:
     """Build the configured Agno model (fresh instance per agent — they are not shared).
 
-    fast=True is for calls where latency beats depth — the team leader's routing hop
-    and other single-decision calls: a small output budget, and on Gemini a zero
-    thinking budget (the 20-40s spike latencies were dominated by thinking tokens on
-    the extra leader hop; routing needs none).
+    fast=True is for calls where latency beats depth — single-decision calls like the
+    name-gender classifier: a small output budget, and on Gemini a zero thinking budget
+    (measured: thinking tokens dominated the latency of calls that need none).
     """
     s = get_settings()
     mid = model_id or s.llm_model
     max_tokens = 512 if fast else s.llm_max_tokens
     if s.llm_provider == "openrouter":
         kwargs: dict[str, Any] = {"base_url": s.openrouter_api_base} if s.openrouter_api_base else {}
+        extra: dict[str, Any] = {}
         if fast:
-            kwargs["extra_body"] = {"reasoning": FAST_REASONING}
+            extra["reasoning"] = FAST_REASONING
+        if "gemini" in mid.lower():
+            extra["provider"] = GEMINI_PROVIDER_ROUTING
+        if extra:
+            kwargs["extra_body"] = extra
         return _caching_openrouter_cls()(
             id=mid, api_key=s.openrouter_api_key, max_tokens=max_tokens, **kwargs
         )
@@ -145,20 +164,28 @@ def _log_usage(label: str, result: Any) -> None:
     above is landing — after the first turn it should be nearly the whole input. INFO so it
     shows up in the VPS logs without a debug build.
 
-    For "team-turn" this is the aggregate of BOTH hops, so the percentage is diluted by the
-    leader's small uncached routing prompt; the member's own share is the near-100% one."""
+    A turn with a tool call reports twice, once per model round-trip; both should show the
+    same near-total cache read, since the system prompt is identical across them."""
     metrics = getattr(result, "metrics", None)
     if metrics is None:
         return
     read = getattr(metrics, "cache_read_tokens", 0) or 0
     inp = getattr(metrics, "input_tokens", 0) or 0
+    out = getattr(metrics, "output_tokens", 0) or 0
+    # Reasoning tokens are billed at the OUTPUT rate and are invisible in the reply, so
+    # they are the one line item nobody notices they are paying for. Broken out because
+    # "how much is thinking costing us, and how close is it to the cap" is not answerable
+    # from a total — and both answers decide whether to bound it (see build_model).
+    think = getattr(metrics, "reasoning_tokens", 0) or 0
     log.info(
-        "%s tokens: input=%d cached=%d (%.0f%%) output=%d",
+        "%s tokens: input=%d cached=%d (%.0f%%) output=%d (thinking=%d, cap=%d)",
         label,
         inp,
         read,
         100.0 * read / inp if inp else 0.0,
-        getattr(metrics, "output_tokens", 0) or 0,
+        out,
+        think,
+        get_settings().llm_max_tokens,
     )
 
 

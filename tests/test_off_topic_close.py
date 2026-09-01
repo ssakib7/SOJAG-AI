@@ -1,8 +1,8 @@
 """Off-topic force-stop: one closing reply, then total silence.
 
 The rule lives in STRICT_ADHERENCE (prompt side), but the silence is enforced
-deterministically here — a prompt alone cannot make the bot say nothing, because an
-empty model reply is replaced by FALLBACK_EMPTY before it is sent.
+deterministically here — a prompt alone cannot make the bot stop answering, because the
+NEXT message would reach the model just like any other.
 
 The trigger is the model's end_conversation tool call, never a match on the reply text:
 the closing line is Bengali prose the model may legitimately reword, and a missed match

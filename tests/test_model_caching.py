@@ -14,7 +14,13 @@ import pytest
 from agno.models.message import Message
 
 from app.agents import factory
-from app.agents.model import CACHE_BREAK, CACHE_MIN_CHARS, FAST_REASONING, build_model
+from app.agents.model import (
+    CACHE_BREAK,
+    CACHE_MIN_CHARS,
+    FAST_REASONING,
+    GEMINI_PROVIDER_ROUTING,
+    build_model,
+)
 from app.agents.turn_context import TurnContext, current_turn
 from app.config import get_settings
 from app.kb import config as kb_config
@@ -54,11 +60,23 @@ def test_user_turn_is_never_cached(openrouter):
 
 
 def test_fast_path_caps_reasoning(openrouter):
-    assert build_model(fast=True).extra_body == {"reasoning": FAST_REASONING}
+    assert build_model(fast=True).extra_body["reasoning"] == FAST_REASONING
 
 
 def test_normal_path_sends_no_reasoning_override(openrouter):
-    assert build_model().extra_body is None
+    assert "reasoning" not in (build_model().extra_body or {})
+
+
+def test_gemini_is_pinned_to_googles_own_endpoints(openrouter):
+    # OpenRouter would otherwise fan the call out to any host serving the model. Both the
+    # normal and the fast path must carry the pin — the routing hop is a real customer turn.
+    assert build_model().extra_body["provider"] == GEMINI_PROVIDER_ROUTING
+    assert build_model(fast=True).extra_body["provider"] == GEMINI_PROVIDER_ROUTING
+
+
+def test_non_gemini_models_are_left_to_openrouters_own_routing(openrouter):
+    # The pin lists Google-only backends; sending it with anything else routes to nothing.
+    assert build_model("openai/gpt-4o-mini").extra_body is None
 
 
 @pytest.fixture
@@ -121,27 +139,28 @@ def assembled_prompt(monkeypatch):
     return prompt
 
 
-def _member_prompts(turn=None):
+def _prompt(turn=None) -> str:
     token = current_turn.set(turn)
     try:
-        return {
-            role: factory._member_system_message(role)()
-            for role in (factory.KNOWLEDGE_ROLE, factory.SALES_ROLE, factory.LEAD_ROLE)
-        }
+        return factory._system_message()()
     finally:
         current_turn.reset(token)
 
 
-def test_all_three_members_share_one_cached_prefix(assembled_prompt):
-    # The whole point: one cache entry for the knowledge base, not one per member. Agno's
-    # default assembly emits role BEFORE instructions, which would break this.
-    heads = {p.split(CACHE_BREAK)[0] for p in _member_prompts().values()}
-    assert heads == {assembled_prompt}
+def test_the_knowledge_base_is_in_the_cached_half(assembled_prompt):
+    # The whole point: the persona + knowledge base is one cache entry, byte-identical on
+    # every call. Agno's default assembly emits its own scaffolding BEFORE the
+    # instructions, which is why the agent takes system_message= instead.
+    assert _prompt().split(CACHE_BREAK)[0] == assembled_prompt + factory._static_policy_blocks()
 
 
-def test_each_member_still_sees_its_own_role(assembled_prompt):
-    for role, prompt in _member_prompts().items():
-        assert prompt.split(CACHE_BREAK)[1].startswith(f"\n\n<your_role>\n{role}\n</your_role>")
+def test_the_unchanging_policy_blocks_are_cached_not_paid_for_every_turn(assembled_prompt):
+    """The honorific and payment policies read like per-turn instructions but are the same
+    bytes for every customer on every turn. Behind the breakpoint they cost full input rate
+    on every member call, and twice on any turn with a tool call."""
+    head, tail = _prompt().split(CACHE_BREAK)
+    assert "=== HONORIFICS ===" in head and "=== HONORIFICS ===" not in tail
+    assert "=== PAYMENTS ===" in head and "=== PAYMENTS ===" not in tail
 
 
 def test_dynamic_blocks_land_after_the_breakpoint(assembled_prompt):
@@ -152,17 +171,16 @@ def test_dynamic_blocks_land_after_the_breakpoint(assembled_prompt):
         session={"returning": True, "customer_name": "Rahim Uddin"},
         profile={"name": "Rahim Uddin", "gender_guess": "male"},
     )
-    prompt = _member_prompts(turn)[factory.SALES_ROLE]
-    head, tail = prompt.split(CACHE_BREAK)
-    assert head == assembled_prompt
+    head, tail = _prompt(turn).split(CACHE_BREAK)
+    assert head == assembled_prompt + factory._static_policy_blocks()
     assert "=== RETURNING CUSTOMER ===" in tail
-    assert "=== ADDRESSING THE CUSTOMER ===" in tail
+    # Only the one line that actually differs per customer stays behind the breakpoint.
+    assert "=== THIS CUSTOMER'S HONORIFIC ===" in tail
+    assert len(tail) < 1500, f"the full-rate tail is paid on every call; it is {len(tail)} chars"
 
 
 def test_prefix_is_identical_across_turns_with_different_state(assembled_prompt):
-    quiet = _member_prompts()[factory.SALES_ROLE]
-    asking = _member_prompts(
-        TurnContext(sender_id="1", session={}, ask_contact=True)
-    )[factory.SALES_ROLE]
+    quiet = _prompt()
+    asking = _prompt(TurnContext(sender_id="1", session={}, ask_contact=True))
     assert quiet != asking
     assert quiet.split(CACHE_BREAK)[0] == asking.split(CACHE_BREAK)[0]

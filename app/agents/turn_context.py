@@ -22,12 +22,17 @@ class TurnContext:
     session: dict[str, Any]
     combined_text: str = ""            # the whole burst, joined — used by trx-id fallback
     transcript: str = ""               # rendered conversation: payment verifier + the member's own prompt
-    history_turns: int = 0             # committed turns before this one; 0 = genuinely the first reply
+    history_turns: int = 0             # committed messages before this one; 0 = nothing said yet
+    replied_turns: int = 0             # of those, how many are OURS; 0 = we have never answered
     profile: dict[str, Any] | None = None
     ask_contact: bool = False          # deterministic contact-ask fires this turn
     offered_phone: str | None = None   # valid BD number the customer actually typed
     known_phone: str | None = None     # number already on file
     images: list[Any] = field(default_factory=list)  # agno Images the customer sent this turn
+    # 0 on the first try, 1 on the retry after an empty reply. Carried on the context
+    # rather than as a run_turn() argument so the pipeline's call signature stays
+    # one-argument (every test stub for run_turn takes exactly the turn).
+    attempt: int = 0
 
     # Scratch: set by tools during the run, read by the pipeline after the send.
     lead: dict[str, Any] | None = None

@@ -32,10 +32,18 @@ from app.db.models import CustomerRow, RecentRow, SessionRow
 # context (and the contact-ask counter) for exactly the leads worth keeping.
 SESSION_TTL_MS = 4 * 60 * 60 * 1000
 
-# How long the bot stays quiet after a colleague replies from the Page inbox. Long enough
-# to cover a real back-and-forth, short enough that a customer who returns tomorrow is
-# served instead of ignored. Refreshed on every further human reply.
-HUMAN_TAKEOVER_MS = 8 * 60 * 60 * 1000
+# How long the bot stays quiet after a colleague replies from the Page inbox, refreshed
+# on every further human reply — so a live human exchange never expires underneath the
+# person having it, and this only bounds how long the pause outlasts their LAST message.
+#
+# Deliberately SHORTER than SESSION_TTL_MS. At 8h the pause outlived the conversation it
+# was protecting: prune() below refuses to drop a paused session, so a thread the bot had
+# already forgotten stayed frozen for another four hours. The risk being guarded against —
+# the bot interleaving with a person mid-exchange — decays in minutes, while the cost of
+# the pause (an ad-traffic customer who comes back in the evening and reaches nobody,
+# because the bot is silenced and the team has gone home) does not. Two hours covers a
+# real back-and-forth and releases inside the same working day.
+HUMAN_TAKEOVER_MS = 2 * 60 * 60 * 1000
 
 # How long a force-stop counts toward the auto-block. Without a window, three misfires
 # spread over three months would block a real customer as surely as three in ten minutes.
@@ -214,6 +222,24 @@ def remember_turn(session: dict[str, Any], user_text: str, reply_text: str) -> N
     is actually sent — a discarded draft leaves no trace."""
     session["history"].append({"role": "user", "parts": [{"text": user_text}]})
     session["history"].append({"role": "model", "parts": [{"text": reply_text}]})
+    if len(session["history"]) > MAX_HISTORY:
+        del session["history"][: len(session["history"]) - MAX_HISTORY]
+
+
+def remember_unanswered(session: dict[str, Any], user_text: str) -> None:
+    """Commit the CUSTOMER's half of a turn we could not answer.
+
+    A turn the model failed on used to leave no trace at all, which meant the customer's
+    words were gone: they had typed their name, their number and their batch, been handed
+    a fallback for each, and the next turn began as though none of it had happened — the
+    bot asking again for what it had already been told. The reply half is genuinely worth
+    dropping (a fallback is not something to reason from, and history must never claim we
+    answered when we did not); the customer's half is the context.
+
+    History is therefore not strictly alternating any more — factory._history_messages
+    merges consecutive same-role entries for the wire.
+    """
+    session["history"].append({"role": "user", "parts": [{"text": user_text}]})
     if len(session["history"]) > MAX_HISTORY:
         del session["history"][: len(session["history"]) - MAX_HISTORY]
 

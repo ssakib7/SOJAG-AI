@@ -66,9 +66,37 @@ def is_human_takeover(event: dict[str, Any]) -> bool:
     app that sent them; a message a human typed in the Page inbox / Business Suite has no
     app_id. That difference is the only signal we get that a person has taken the
     conversation over — without it the bot cheerfully talks over its own colleagues.
+
+    An echo carrying a mid we know we sent is ours no matter what app_id says, so the
+    day Meta omits that field the bot does not mistake its own voice for a colleague's
+    and go silent for eight hours.
+
+    Requires the message_echoes webhook field. Without it Meta delivers no echoes at all
+    and this is never even called — which is exactly how the bot talked over the team for
+    a week while every other part of the handover worked. _log_echo below makes that
+    visible instead of silent.
     """
+    from app.meta import graph
+
     message = event.get("message") or {}
-    return bool(message.get("is_echo")) and not message.get("app_id")
+    if not message.get("is_echo"):
+        return False
+    if graph.was_sent_by_us(message.get("mid")):
+        return False
+    return not message.get("app_id")
+
+
+def _log_echo(event: dict[str, Any], takeover: bool) -> None:
+    """Every echo, one line. Echoes used to be dropped in silence, so "the bot is talking
+    over us" and "Meta never sent us an echo" looked identical from the logs."""
+    message = event.get("message") or {}
+    log.info(
+        "echo [%s] app_id=%s mid=%s → %s",
+        (event.get("recipient") or {}).get("id") or "unknown",
+        message.get("app_id") or "-",
+        message.get("mid") or "-",
+        "HUMAN TAKEOVER" if takeover else "our own send, ignored",
+    )
 
 
 def enqueue_event(event: dict[str, Any]) -> None:
@@ -85,7 +113,9 @@ def enqueue_event(event: dict[str, Any]) -> None:
 
     # Echoes: on an echo the "sender" is the PAGE and the customer is the recipient.
     if (event.get("message") or {}).get("is_echo"):
-        if is_human_takeover(event):
+        takeover = is_human_takeover(event)
+        _log_echo(event, takeover)
+        if takeover:
             customer_id = (event.get("recipient") or {}).get("id")
             if customer_id:
                 state.pause_for_human(customer_id)
@@ -139,17 +169,21 @@ def _spawn(coro) -> None:
 
 
 async def _rescue_failed_batch(sender_id: str, err: Exception) -> None:
-    """Last resort when a turn blew up after the customer's messages were consumed."""
-    from app.kb.defaults import FALLBACK_ERROR
-    from app.meta import graph
+    """Last resort when a turn blew up after the customer's messages were consumed.
+
+    The customer is told nothing. This used to send an apology, and the apology was the
+    whole problem: it cannot fix anything the customer can act on, it makes the chat look
+    answered to anyone scrolling the Page inbox, and under a persistent fault it stacks up
+    under their own messages. The escalation below is the entire response — it is what
+    actually ends with a person replying.
+    """
     from app.ops import escalate
 
     with contextlib.suppress(Exception):
-        await graph.send_message(sender_id, FALLBACK_ERROR)
-    with contextlib.suppress(Exception):
         await escalate.notify_team(
             sender_id, state.sessions.get(sender_id), "other",
-            f"বট এই বার্তাটি প্রক্রিয়া করতে ব্যর্থ হয়েছে ({type(err).__name__}) — গ্রাহককে সরাসরি উত্তর দিন।",
+            f"বট এই বার্তাটি প্রক্রিয়া করতে ব্যর্থ হয়েছে ({type(err).__name__}) — "
+            "গ্রাহক কোনো উত্তর পাননি। অনুগ্রহ করে ইনবক্স থেকে সরাসরি উত্তর দিন।",
         )
 
 

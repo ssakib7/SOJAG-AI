@@ -210,9 +210,9 @@ def _mount_agentos(app: FastAPI) -> FastAPI:
     os.environ.setdefault("OS_SECURITY_KEY", settings.os_security_key)
     from agno.os import AgentOS
 
-    from app.agents.factory import build_team
+    from app.agents.factory import build_agent
 
-    agent_os = AgentOS(id="dejure-agent", name="De Jure Agent", teams=[build_team()], telemetry=False)
+    agent_os = AgentOS(id="dejure-agent", name="De Jure Agent", agents=[build_agent()], telemetry=False)
     app.mount("/os", agent_os.get_app())
     log.info("AgentOS control plane mounted at /os (bearer-protected).")
     return app

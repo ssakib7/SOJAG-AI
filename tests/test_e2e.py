@@ -1,10 +1,10 @@
 """End-to-end pipeline test with a stubbed OpenAI-compatible LLM and stubbed
 Graph/Sheet endpoints — the port of the old repo's _e2e_test.mjs idea.
 
-Exercises the REAL path: signed webhook -> per-sender queue -> batching -> Team(route)
-leader delegates to the sales member -> save_lead tool -> phone validated (the number
-the customer TYPED wins) -> reply sent via the Graph stub -> lead ledger + outbox row
--> Sheet sink delivery. No real network, no API keys.
+Exercises the REAL path: signed webhook -> per-sender queue -> batching -> the agent
+-> save_lead tool -> phone validated (the number the customer TYPED wins) -> reply sent
+via the Graph stub -> lead ledger + outbox row -> Sheet sink delivery. No real network,
+no API keys.
 """
 
 from __future__ import annotations
@@ -102,12 +102,8 @@ class StubHandler(BaseHTTPRequestHandler):
         )
         payment_scenario = "টাকা পাঠিয়ে" in last_user or "8N7A2B3C4D" in last_user
 
-        if "delegate_task_to_member" in tool_names and not has_tool_result:
-            StubHandler.log.append({"kind": "llm", "role": "leader"})
-            return tool_call("delegate_task_to_member",
-                            {"member_id": "sales", "task": "Handle this sales turn."})
         if payment_scenario and "report_payment" in tool_names and not has_tool_result:
-            StubHandler.log.append({"kind": "llm", "role": "member-payment-toolcall"})
+            StubHandler.log.append({"kind": "llm", "role": "agent-payment-toolcall"})
             return tool_call("report_payment", {
                 "note": "ভর্তি নিশ্চিত হয়েছে কিনা জানতে চান",
                 "trx_id": "8N7A2B3C4D", "method": "bKash", "amount": "22000",
@@ -115,14 +111,14 @@ class StubHandler(BaseHTTPRequestHandler):
         system = next((m.get("content") for m in messages if m.get("role") == "system"), None)
 
         if not payment_scenario and "save_lead" in tool_names and not has_tool_result:
-            StubHandler.log.append({"kind": "llm", "role": "member-toolcall", "system": system})
+            StubHandler.log.append({"kind": "llm", "role": "agent-toolcall", "system": system})
             return tool_call("save_lead", {
                 # The model "mangles" the number (drops a digit) — the pipeline must
                 # prefer the digits the customer actually typed.
                 "name": "Orko Rahman", "phone": "0171234567",
                 "interest": "Bar Council কোর্স", "remarks": "দ্রুত ভর্তি হতে চান",
             })
-        StubHandler.log.append({"kind": "llm", "role": "member-final", "has_tool_result": has_tool_result,
+        StubHandler.log.append({"kind": "llm", "role": "agent-final", "has_tool_result": has_tool_result,
                                 "tools": tool_names, "payment_scenario": payment_scenario,
                                 "system": system, "messages": messages})
         return completion({"role": "assistant",
@@ -205,27 +201,31 @@ def test_full_lead_capture_flow(e2e_client):
     assert "ধন্যবাদ" in sent_texts[-1]
 
     roles = [entry["role"] for entry in StubHandler.log if entry["kind"] == "llm"]
-    assert "leader" in roles, "team leader never ran"
-    assert "member-toolcall" in roles, "sales member never called save_lead"
+    assert "leader" not in roles, (
+        "a routing hop ran — the team was removed precisely because it cost a call per turn "
+        "and could swallow one silently"
+    )
+    assert "agent-toolcall" in roles, "the agent never called save_lead"
 
     # Prompt caching, verified on the wire rather than on our own string building: the
-    # member's system message must reach OpenRouter as [cached persona+KB, uncached tail].
+    # system message must reach OpenRouter as [cached persona+KB, uncached per-turn tail].
     # Unit tests can only prove what we hand Agno — this proves what Agno emits.
     from app.agents.model import CACHE_BREAK
 
-    member_systems = [e["system"] for e in StubHandler.log
-                      if e["kind"] == "llm" and e["role"].startswith("member")]
-    assert member_systems, "no member call reached the LLM stub"
-    for system in member_systems:
+    systems = [e["system"] for e in StubHandler.log
+               if e["kind"] == "llm" and e["role"].startswith("agent")]
+    assert systems, "no agent call reached the LLM stub"
+    for system in systems:
         assert isinstance(system, list) and len(system) == 2, f"not split: {system!r:.200}"
         head, tail = system
         assert head["cache_control"] == {"type": "ephemeral"}
         assert "cache_control" not in tail
         assert "=== KNOWLEDGE BASE ===" in head["text"], "the KB must be inside the cached half"
-        assert "<your_role>" in tail["text"], "the per-member half must be outside it"
+        assert "=== PAYMENTS ===" in head["text"], "an unchanging policy must not be paid for per turn"
+        assert "HONORIFIC" in tail["text"], "the one per-customer line belongs outside the cache"
         assert CACHE_BREAK not in head["text"] + tail["text"]
-    # Every member call sends the identical cached prefix — that is the whole point.
-    assert len({s[0]["text"] for s in member_systems}) == 1
+    # Every call sends the identical cached prefix — that is the whole point.
+    assert len({s[0]["text"] for s in systems}) == 1
 
     # Sheet delivery: the customer's TYPED number must win over the model's mangled copy.
     sheet_hits = [entry for entry in StubHandler.log if entry["kind"] == "sheet"]
@@ -284,7 +284,7 @@ def test_payment_claim_flow(e2e_client):
     assert "Verify before confirming" in alert
 
     roles = [e["role"] for e in StubHandler.log if e["kind"] == "llm"]
-    assert "member-payment-toolcall" in roles, "report_payment never called"
+    assert "agent-payment-toolcall" in roles, "report_payment never called"
     assert "verifier" in roles, "payment verifier never consulted"
 
     sent_texts = [

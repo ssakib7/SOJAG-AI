@@ -153,6 +153,35 @@ VERIFY_DONE = re.compile(
 )
 
 
+# The other sentence the bot must never write: an apology for its own machinery.
+# "দুঃখিত, একটি সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।" was a canned fallback until it
+# was deleted — but deleting a constant only stops OUR code from sending it. The model can
+# write the same sentence itself at any time, from the KB, from an admin-edited prompt, or
+# from nothing at all, so the ban is enforced on the way OUT (see graph.send_message).
+#
+# It is banned because it is not an answer: it tells a customer their message failed while
+# giving them nothing to do about it, and when the cause persists it lands two and three
+# times in a row under their own messages. Silence plus a page to the team beats it — the
+# customer is no less informed, and a human arrives.
+#
+# BOTH halves are required, so ordinary courtesy still gets through: "দুঃখিত স্যার, এই
+# তথ্যটি আমাদের কাছে নেই" is an apology with no failure claim, and "পেমেন্টে সমস্যা হয়েছে
+# কিনা দেখছি" is a failure word with no apology. Only the two together make the sentence
+# that says "our software broke".
+APOLOGY = re.compile(r"(দুঃখিত|দু:খিত|দুখিত|সরি|sorry|apolog)", re.IGNORECASE)
+TECH_FAILURE = re.compile(
+    r"(সমস্যা\s*হয়েছে|সমস্যা\s*হচ্ছে|ভুল\s*হয়েছে|ত্রুটি|গণ্ডগোল|"
+    r"went\s*wrong|error|technical\s*(problem|issue|difficult))",
+    re.IGNORECASE,
+)
+
+
+def apologises_for_a_failure(text: object) -> bool:
+    """True when a reply blames our own software for not answering."""
+    s = str(text or "")
+    return bool(APOLOGY.search(s) and TECH_FAILURE.search(s))
+
+
 def claims_payment_verified(text: object) -> bool:
     """True when a reply tells the customer their payment has landed, cleared, or been
     accepted. Used only on turns where a receipt was actually seen."""

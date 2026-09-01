@@ -595,6 +595,8 @@ BLOCKED = """{% extends "shell" %}
 <p class="lede">Senders the bot <strong>never replies to</strong>. Their messages are dropped before any AI call, so they cost nothing. Blocking is silent and reversible: the person can still message the page and your team can still read them in the Meta inbox — the bot just stays quiet. Takes effect immediately.</p>
 {% if done == "blocked" %}<div class="flash">Blocked. The bot will not reply to this sender from now on.</div>
 {% elif done == "unblocked" %}<div class="flash">Unblocked. The bot will answer this sender again.</div>
+{% elif done == "resumed" %}<div class="flash">Handed back to the bot. It answers this customer again from the next message.</div>
+{% elif done == "not-paused" %}<div class="flash">That conversation was not paused — nothing changed.</div>
 {% elif done == "invalid" %}<div class="flash" style="color:var(--red);border-color:rgba(255,107,107,.3);background:rgba(255,107,107,.08)">No sender ID given — nothing was blocked.</div>{% endif %}
 
 <section class="card">
@@ -638,10 +640,11 @@ BLOCKED = """{% extends "shell" %}
 <section class="card">
   <h2>Recent senders — last 7 days</h2>
   <p class="hint">Everyone who messaged the bot in the past week, <strong>busiest first</strong> — the ones wasting the most tokens sit at the top. Names appear when Facebook's profile lookup resolves them (or when the customer typed their name in chat). The list fills as messages arrive, so senders from before this feature went live appear once they message again.</p>
+  <p class="hint"><strong>Answered by</strong> shows who owns each conversation. When someone from your team replies in the Meta inbox the bot steps aside for that customer and stays quiet until the time shown — use <em>Give back to bot</em> to end that early, once you are done with them.</p>
   {% if recents %}
   <input type="search" placeholder="Search by name, ID or message…" oninput="filterTable(this, 'recent-table')" style="margin:14px 0">
-  <div class="table-wrap scroll-table"><table id="recent-table" style="min-width:720px">
-  <thead><tr><th>Name</th><th>Sender ID</th><th>Last message</th><th>Msgs</th><th>Last active</th><th></th></tr></thead>
+  <div class="table-wrap scroll-table"><table id="recent-table" style="min-width:860px">
+  <thead><tr><th>Name</th><th>Sender ID</th><th>Last message</th><th>Msgs</th><th>Last active</th><th>Answered by</th><th></th></tr></thead>
   <tbody>
   {% for r in recents %}
   <tr>
@@ -650,6 +653,12 @@ BLOCKED = """{% extends "shell" %}
     <td>{% if r.last_message %}{{ r.last_message }}{% else %}<span style="color:var(--muted-2)">—</span>{% endif %}</td>
     <td class="col-num" style="text-align:right">{{ r.msg_count }}</td>
     <td style="white-space:nowrap">{{ r.when }}</td>
+    <td style="white-space:nowrap">{% if r.paused %}<span title="Paused until {{ r.paused_until }}">🧑 Your team</span>
+      <form method="post" action="/handover/resume" style="margin:4px 0 0"><input type="hidden" name="_csrf" value="{{ csrf }}">
+        <input type="hidden" name="senderId" value="{{ r.sender_id }}">
+        <input type="hidden" name="next" value="/blocked">
+        <button type="submit" class="btn-ghost" style="padding:4px 10px;font-size:12px">Give back to bot</button>
+      </form>{% else %}<span style="color:var(--muted-2)">🤖 Bot</span>{% endif %}</td>
     <td><form method="post" action="/blocked/add" style="margin:0"><input type="hidden" name="_csrf" value="{{ csrf }}">
       <input type="hidden" name="senderId" value="{{ r.sender_id }}">
       <input type="hidden" name="name" value="{{ r.name }}">

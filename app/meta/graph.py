@@ -14,8 +14,10 @@ Hard-won rules preserved from the Node bot:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -24,7 +26,7 @@ import httpx
 
 from app.config import get_settings
 from app.db import state
-from app.utils.text import split_for_messenger
+from app.utils.text import apologises_for_a_failure, split_for_messenger
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +84,19 @@ async def send_message(recipient_id: str, text: str) -> bool:
     a delivered reply. A swallowed failure used to mean the customer got silence while
     the bot's own history claimed it had answered, so every later turn argued with a
     message that was never seen.
+
+    This is also where "the bot never apologises for its own machinery" is enforced. It
+    lives HERE, at the one choke point every customer-facing message passes through —
+    model replies, canned fallbacks, follow-up nudges, the ad greeting — because that is
+    the only place the rule can be absolute. Deleting the canned string was not enough:
+    the model can write that sentence unprompted. A blocked reply returns False, which is
+    already the "customer got nothing" path — history is not committed and the team is
+    paged, so a person answers instead.
     """
+    if apologises_for_a_failure(text):
+        log.error("🚫 [%s] BLOCKED an apology-for-a-failure reply — sending nothing instead: %s",
+                  recipient_id, text[:200])
+        return False
     if get_settings().shadow_mode:
         log.info("[shadow] → [%s] %s", recipient_id, text[:200])
         await _record_shadow(recipient_id, "message", text)
@@ -99,6 +113,31 @@ async def send_message(recipient_id: str, text: str) -> bool:
                           recipient_id, index + 1, len(chunks))
             return False
     return True
+
+
+# Mids of messages WE sent. Meta echoes every outbound message back to the webhook, and
+# our own echo must never be read as a colleague replying from the Page inbox — that
+# would silence the bot for 8 hours per customer. The echo's app_id is the primary
+# signal; this is the backstop for the day Meta omits it.
+_our_mids: OrderedDict[str, bool] = OrderedDict()
+OUR_MIDS_MAX = 500
+
+
+def _record_our_mid(body: str) -> None:
+    """Remember the message_id Meta just handed back for a message we sent."""
+    try:
+        mid = (json.loads(body) or {}).get("message_id")
+    except Exception:
+        return
+    if not mid:
+        return
+    _our_mids[mid] = True
+    while len(_our_mids) > OUR_MIDS_MAX:
+        _our_mids.popitem(last=False)
+
+
+def was_sent_by_us(mid: str | None) -> bool:
+    return bool(mid) and mid in _our_mids
 
 
 # Send retries. Meta rate-limits (#613) and 5xx-es under exactly the bursts an ad
@@ -140,6 +179,7 @@ async def _send_one(recipient_id: str, text: str) -> bool:
     for attempt in range(1, SEND_ATTEMPTS + 1):
         status, body = await _post_send(url, params, payload)
         if status is not None and status < 400:
+            _record_our_mid(body)
             record_send_result(True)
             return True
 

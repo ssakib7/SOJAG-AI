@@ -31,8 +31,6 @@ from app.db import state
 from app.kb import config as kb_config
 from app.kb.defaults import (
     FALLBACK_ATTACHMENT,
-    FALLBACK_EMPTY,
-    FALLBACK_ERROR,
     FALLBACK_ESCALATED,
     FALLBACK_GREETING,
     FALLBACK_LEAD_RETRY,
@@ -74,6 +72,22 @@ def _reply_window_ms() -> tuple[int, int]:
     lo = max(s.reply_min_seconds, 0) * 1000
     hi = max(max(s.reply_max_seconds, 0) * 1000, lo)
     return lo, hi
+
+
+def _human_took_over(sender_id: str, what: str) -> bool:
+    """A colleague answered from the Page inbox while this turn was still being composed.
+
+    The queue checks this before a turn starts, but a turn runs 15-35s (the reading beat,
+    then the model, then the humanized pause, times any regeneration). A colleague who
+    jumped in during that window was talked over by a reply that was already in flight —
+    the pause had been set, the draft just never looked at it again. Checked HERE too,
+    immediately before every outbound message, because that is the last moment the answer
+    can still be withdrawn.
+    """
+    if not state.is_human_handling(sender_id):
+        return False
+    log.info("🧑 [%s] human took over mid-turn — %s withheld", sender_id, what)
+    return True
 
 
 async def _human_send(sender_id: str, text: str, head_start_ms: int = 0) -> bool:
@@ -344,7 +358,12 @@ async def _announce_auto_block(sender_id: str, name: str, reason: str, closes: i
 
 
 def _reply_fallback(turn: TurnContext) -> str:
-    """The right fallback when the model produced no text after a tool call."""
+    """The right fallback when the model produced no text after a tool call.
+
+    Returns "" when there is nothing to go on — the model wrote no text AND called no
+    tool. That empty string is a real answer to the caller's question, not a bug: there
+    is no honest sentence to put in its place, so nothing is sent at all.
+    """
     if turn.payment:
         return FALLBACK_PAYMENT_ACK
     if turn.notice:
@@ -353,23 +372,54 @@ def _reply_fallback(turn: TurnContext) -> str:
         return FALLBACK_LEAD_THANKS
     if turn.lead_invalid:
         return FALLBACK_LEAD_RETRY
-    # Nothing to go on: the model returned no text and called no tool. The customer is
-    # about to be handed an apology in place of an answer, so a person should look —
-    # observed in testing on "I don't want to give my number, just get me a human", which
-    # is exactly the message you cannot afford to fumble.
+    # Nothing to go on. A person should look — observed live on "I don't want to give my
+    # number, just get me a human", which is exactly the message you cannot afford to
+    # fumble; _apply_side_effects pages the team off this flag.
     turn.extras["empty_reply"] = True
-    return FALLBACK_EMPTY
+    return ""
 
 
-async def _run_model_turn(sender_id: str, session: dict[str, Any], combined: str,
-                          ask_contact: bool, offered_phone: str | None, known_phone: str | None,
-                          profile: dict[str, Any], images: list[Image] | None = None) -> TurnContext:
-    """One model attempt. Returns the TurnContext with reply text in extras["text"].
-    LLM failure -> FALLBACK_ERROR with no side effects and no history commit."""
+# One retry, then silence. Sampling alone makes the second attempt a genuinely different
+# call, and an empty reply is cheap to retry and expensive to ship. A third would only add
+# latency for a customer already waiting.
+EMPTY_REPLY_RETRIES = 1
+
+
+def _no_reply_reason(turn: TurnContext) -> str:
+    """What to tell the team when the customer got nothing. The two causes need different
+    words because they need different people: a model that answered with nothing is a
+    prompt/content problem, a model that did not answer at all is an outage — an API key,
+    a quota, a billing card. Saying which saves the first ten minutes."""
+    error = turn.extras.get("llm_error")
+    if error:
+        return (
+            "AI মডেল সাড়া দেয়নি — গ্রাহক কোনো উত্তর পাননি। অনুগ্রহ করে ইনবক্স থেকে সরাসরি উত্তর "
+            f"দিন এবং মডেলের কোটা/বিলিং/API key দেখে নিন। কারিগরি বিবরণ: {error}"
+        )
+    return (
+        "বট এই বার্তার কোনো উত্তর তৈরি করতে পারেনি — গ্রাহক কোনো উত্তর পাননি। "
+        "অনুগ্রহ করে দেখে নিন।"
+    )
+
+
+async def _model_attempt(sender_id: str, session: dict[str, Any], combined: str,
+                         ask_contact: bool, offered_phone: str | None, known_phone: str | None,
+                         profile: dict[str, Any], images: list[Image] | None = None,
+                         attempt: int = 0) -> TurnContext:
+    """One model call. Returns the TurnContext with reply text in extras["text"] —
+    "" when the model produced nothing usable, INCLUDING when the call failed outright.
+
+    A model failure sends the customer nothing at all. It used to send "দুঃখিত, এই মুহূর্তে
+    উত্তর দিতে পারছি না। একটু পরে আবার চেষ্টা করুন।", and that line was doing no work: the
+    customer cannot fix our model, "try again later" is an instruction to leave, and the
+    bubble made the chat look answered to anyone scrolling the inbox. The team is paged
+    instead (extras["llm_error"], read in _apply_side_effects), which is the only response
+    that actually ends with the customer getting an answer.
+    """
     turn = TurnContext(
         sender_id=sender_id, session=session, combined_text=combined, profile=profile,
         ask_contact=ask_contact, offered_phone=offered_phone, known_phone=known_phone,
-        images=images or [],
+        images=images or [], attempt=attempt,
     )
     try:
         text = await factory.run_turn(turn)
@@ -381,8 +431,36 @@ async def _run_model_turn(sender_id: str, session: dict[str, Any], combined: str
         # and drop any scratch a partial run may have left.
         turn.lead = None
         turn.payment = None
-        turn.extras["text"] = FALLBACK_ERROR
+        turn.extras["text"] = ""
         turn.extras["commit"] = False
+        turn.extras["llm_error"] = f"{type(err).__name__}: {err}"[:200]
+    return turn
+
+
+async def _run_model_turn(sender_id: str, session: dict[str, Any], combined: str,
+                          ask_contact: bool, offered_phone: str | None, known_phone: str | None,
+                          profile: dict[str, Any], images: list[Image] | None = None) -> TurnContext:
+    """One turn's worth of model attempts: the call, then — only if it produced nothing at
+    all — one retry.
+
+    A turn that yields nothing twice comes back with extras["text"] == "", and the caller
+    sends NOTHING. That is deliberate. The apology this used to send ("দুঃখিত, একটি সমস্যা
+    হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।") was the worst of both worlds: it told the
+    customer their message had failed while giving them nothing to act on, it landed
+    repeatedly in a row when the cause persisted, and it buried the real answer a
+    colleague was about to type under an apology from the bot. Silence costs the customer
+    the same amount of information and costs us none of their trust — and it is never
+    silence to US, because empty_reply pages the team on the same turn.
+    """
+    for attempt in range(EMPTY_REPLY_RETRIES + 1):
+        turn = await _model_attempt(
+            sender_id, session, combined, ask_contact, offered_phone, known_phone, profile,
+            images=images, attempt=attempt,
+        )
+        if not turn.extras.get("empty_reply"):
+            return turn
+        if attempt < EMPTY_REPLY_RETRIES:
+            log.warning("⟳ [%s] the model produced no reply — retrying", sender_id)
     return turn
 
 
@@ -466,8 +544,27 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
         break
 
     text = _guard_payment_claim(sender_id, turn.extras["text"])
+    if _human_took_over(sender_id, "reply"):
+        # The draft is dropped exactly as a regenerated one is — nothing sent, nothing
+        # committed to history. The ledger still runs: a phone number or a payment claim
+        # already in hand is ours whether or not we get to answer.
+        await _apply_side_effects(sender_id, session, turn, combined, offered_phone, photos)
+        state.mark_session_dirty(sender_id)
+        return
+    if not text:
+        # Nothing to say — the model answered with nothing twice, or it did not answer at
+        # all. Either way the customer gets silence and the team gets paged, because
+        # neither apology this used to send was worth the bubble it took up. The customer's
+        # own words still enter history, so the next turn (or the colleague reading the
+        # thread) still has the name, the number, the batch they just gave.
+        log.error("🤐 [%s] no reply (%s) — staying silent and paging the team", sender_id,
+                  turn.extras.get("llm_error") or f"empty after {EMPTY_REPLY_RETRIES + 1} attempts")
+        state.remember_unanswered(session, combined)
+        await _apply_side_effects(sender_id, session, turn, combined, offered_phone, photos)
+        state.mark_session_dirty(sender_id)
+        return
     delivered = await graph.send_message(sender_id, text)
-    if turn.extras["commit"] and delivered:
+    if delivered and turn.extras["commit"]:  # a failed turn has no text, so this is belt-and-braces
         state.remember_turn(session, combined, text)  # only now does this turn enter history
     log.info("→ [%s] %s%s", sender_id, text, "" if delivered else "  [NOT DELIVERED]")
 
@@ -518,12 +615,11 @@ async def _apply_side_effects(sender_id: str, session: dict[str, Any], turn: Tur
     if turn.notice:
         await escalate.notify_team(sender_id, session, turn.notice["category"],
                                    turn.notice["reason"], customer_message=combined)
-    elif turn.extras.get("empty_reply"):
+    elif turn.extras.get("empty_reply") or turn.extras.get("llm_error"):
+        # The customer got NOTHING — no answer and, deliberately, no apology either. This
+        # ping is the only thing standing between them and silence, so it is not optional.
         await escalate.notify_team(
-            sender_id, session, "other",
-            "বট এই বার্তার কোনো উত্তর তৈরি করতে পারেনি — গ্রাহক শুধু দুঃখপ্রকাশ পেয়েছেন। "
-            "অনুগ্রহ করে দেখে নিন।",
-            customer_message=combined,
+            sender_id, session, "other", _no_reply_reason(turn), customer_message=combined,
         )
 
     # Only an IDENTIFIED payment reaches the team: a transaction id, or a screenshot. A bare
@@ -569,6 +665,8 @@ async def _apply_side_effects(sender_id: str, session: dict[str, Any], turn: Tur
 async def _prompt_for_text(sender_id: str, session: dict[str, Any]) -> None:
     """Ask (once per cooldown) for the question in writing — for anything we cannot read:
     a voice note, a video, or a file the image path could not download."""
+    if _human_took_over(sender_id, "the write-it-in-text nudge"):
+        return  # the cooldown is deliberately NOT burned: they never got the nudge
     now = state.now_ms()
     if now - (session.get("non_text_prompted_at") or 0) < NON_TEXT_PROMPT_COOLDOWN_MS:
         log.info("non-text fallback suppressed (already prompted recently)")
@@ -622,6 +720,8 @@ async def handle_entry_event(event: dict[str, Any]) -> None:
     await graph.send_action(sender_id, "mark_seen")
     await graph.send_action(sender_id, "typing_on")
     await asyncio.sleep(_rand_between(600, 1800) / 1000)
+    if _human_took_over(sender_id, "the opening greeting"):
+        return
     delivered = await graph.send_message(sender_id, FALLBACK_GREETING)
     log.info("→ [%s] %s%s", sender_id, FALLBACK_GREETING, "" if delivered else "  [NOT DELIVERED]")
     state.mark_session_dirty(sender_id)
@@ -770,6 +870,10 @@ async def _receipt_reply(sender_id: str, session: dict[str, Any], photos: _Photo
     and a warm sentence that oversteps that is the single most expensive thing the bot
     could say. Their other questions are answered by the representative who follows up."""
     await _report_receipt(sender_id, session, photos)
+    # The team is told either way — that alert is the point. Only the customer-facing
+    # acknowledgement is withheld, because a colleague is already writing one.
+    if _human_took_over(sender_id, "the receipt acknowledgement"):
+        return
     await graph.send_message(sender_id, FALLBACK_ATTACHMENT)
     log.info("→ [%s] %s", sender_id, FALLBACK_ATTACHMENT)
     state.mark_session_dirty(sender_id)
@@ -909,14 +1013,31 @@ async def handle_messaging_event(event: dict[str, Any], inbox: dict[str, Any] | 
         break
 
     text = _guard_payment_claim(sender_id, turn.extras["text"])
-    delivered = await graph.send_message(sender_id, text)
+    # Withdrawn, not failed: a stood-down draft must not page the team as an undelivered
+    # reply, and must not enter history as one the customer has seen.
+    stood_down = _human_took_over(sender_id, "reply")
+    # Nothing usable — no text after the retry, or no model call at all. The photo path
+    # stays silent for the same reason the text path does, and pages the team below.
+    withheld = not text and not stood_down
+    if withheld:
+        log.error("🤐 [%s] no reply to the photo (%s) — staying silent and paging the team", sender_id,
+                  turn.extras.get("llm_error") or f"empty after {EMPTY_REPLY_RETRIES + 1} attempts")
+    delivered = False if (stood_down or withheld) else await graph.send_message(sender_id, text)
     if turn.extras["commit"] and delivered:
         state.remember_turn(session, as_text, text)
-    log.info("→ [%s] %s%s", sender_id, text, "" if delivered else "  [NOT DELIVERED]")
+    elif withheld:
+        # The customer's half of the turn is the only part worth keeping, and losing it is
+        # how the context of a photo conversation disappears.
+        state.remember_unanswered(session, as_text)
+    if not stood_down and not withheld:
+        log.info("→ [%s] %s%s", sender_id, text, "" if delivered else "  [NOT DELIVERED]")
     if turn.notice:
         await escalate.notify_team(sender_id, session, turn.notice["category"],
                                    turn.notice["reason"], customer_message=as_text)
-    if not delivered:
+    elif turn.extras.get("empty_reply") or turn.extras.get("llm_error"):
+        await escalate.notify_team(sender_id, session, "other", _no_reply_reason(turn),
+                                   customer_message=as_text)
+    if not delivered and not stood_down and not withheld:
         await _alert_undelivered(sender_id, session, as_text)
 
     # The picture wasn't proof, but the model may still act on the conversation around it

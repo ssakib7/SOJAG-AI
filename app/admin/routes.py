@@ -318,6 +318,32 @@ async def publish_toggle(request: Request) -> Response:
     return RedirectResponse(f"{target}{sep}bot={'published' if published else 'unpublished'}", status_code=302)
 
 
+@router.post("/handover/resume")
+async def handover_resume(request: Request) -> Response:
+    """Give a conversation back to the bot before the takeover pause expires.
+
+    A colleague answering one quick question hands the whole thread to humans for
+    HUMAN_TAKEOVER_MS. That is the right default, but it needs a release: the pause is
+    persisted, so without this there was no way at all — not even a restart — to undo it.
+    Open to both roles, like the publish switch: whoever watches the inbox needs it.
+    """
+    session, _, _ = _auth(request)
+    if not session:
+        return RedirectResponse("/login", status_code=302)
+    body, csrf_ok = await _form(request)
+    if not csrf_ok:
+        return PlainTextResponse("Invalid CSRF token.", status_code=403)
+    sender_id = str(body.get("senderId") or "")
+    resumed = state.resume_bot(sender_id)
+    if resumed:
+        log.info("🤖 [%s] handover released by %s — the bot answers this customer again",
+                 sender_id, session["u"])
+    target = _safe_next(body.get("next")) or "/blocked"
+    sep = "&" if "?" in target else "?"
+    return RedirectResponse(f"{target}{sep}done={'resumed' if resumed else 'not-paused'}",
+                            status_code=302)
+
+
 # --- Blocked users -----------------------------------------------------------
 def _recent_senders() -> list[dict[str, Any]]:
     """Everyone who messaged in the last week, busiest first (a nuisance sender's
@@ -330,12 +356,18 @@ def _recent_senders() -> list[dict[str, Any]]:
             or (state.sessions.get(sender_id) or {}).get("customer_name")
             or ""
         )
+        paused_until = (state.sessions.get(sender_id) or {}).get("human_until") or 0
         rows.append({
             "sender_id": sender_id, "name": name,
             "last_message": _snippet(r.get("last_message")),
             "msg_count": r.get("msg_count", 0),
             "last_seen": r.get("last_seen", 0),
             "when": _fmt_when(r.get("last_seen")),
+            # Who owns this conversation right now. A colleague replying from the Page
+            # inbox silences the bot, and without this the panel gave no sign of it —
+            # the thread simply looked as though the bot had stopped working.
+            "paused": paused_until > state.now_ms(),
+            "paused_until": _fmt_when(paused_until) if paused_until > state.now_ms() else "",
         })
     rows.sort(key=lambda x: (-x["msg_count"], -x["last_seen"]))
     return rows[:300]

@@ -2,8 +2,8 @@
 
 Times three shapes on the configured provider:
   bare   — tiny prompt, no tools (base model latency)
-  member — one agent with the FULL assembled KB prompt + tools (old-bot-equivalent)
-  team   — the real Team(route) turn (adds the leader hop)
+  member — one agent with the FULL assembled KB prompt (no tools, no dynamic blocks)
+  turn   — the real pipeline turn: same prompt plus tools and the per-turn blocks
 
 Usage:
     $env:GEMINI_API_KEY="..." ; uv run python scripts/latency_probe.py
@@ -49,7 +49,7 @@ async def timed(label: str, coro_factory, n: int = 2) -> None:
 async def main() -> None:
     from agno.agent import Agent
 
-    from app.agents.factory import build_team, run_turn
+    from app.agents.factory import run_turn
     from app.agents.model import build_model
     from app.agents.turn_context import TurnContext
     from app.db import state
@@ -73,12 +73,12 @@ async def main() -> None:
     member = Agent(name="member", model=build_model(), instructions=prompt, telemetry=False)
     await timed("member", lambda: member.arun(input=QUESTION))
 
-    async def team_turn():
+    async def real_turn():
         session = state.get_session(f"probe-{time.monotonic_ns()}")
         turn = TurnContext(sender_id="probe", session=session, combined_text=QUESTION)
         await run_turn(turn)
 
-    await timed("team  ", team_turn)
+    await timed("turn  ", real_turn)
     await dispose_engine()
 
 
