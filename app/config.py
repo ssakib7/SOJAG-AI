@@ -48,14 +48,15 @@ class Settings(BaseSettings):
     # twice, and still fell back to the error line.
     llm_timeout_seconds: int = 60
     llm_max_concurrent: int = 25
-    # Bengali + Gemini 3.x thinking tokens share this budget; 1024 truncated replies.
+    # The budget for the Bengali reply; 1024 truncated replies.
     #
     # A CAP, not a spend: billing is per token produced, so raising it costs nothing and
     # lowering it saves nothing — it only decides when the model gets cut off. Kept at 4096
-    # by the team's call. The one thing to watch: a thinking model that hits the cap while
-    # still reasoning returns NO text at all, which arrives as an empty reply rather than a
-    # truncated one. factory._empty_reply_diagnosis logs output tokens against this number
-    # on every empty reply, so if the cap is the cause it says so in one line.
+    # by the team's call. Thinking used to share this budget, and a model that reasoned its
+    # way to the cap returned NO text at all — an empty reply rather than a truncated one.
+    # model.build_model now disables thinking outright, so the whole budget is the answer's.
+    # factory._empty_reply_diagnosis still logs output tokens against this number on every
+    # empty reply, so if the cap is somehow the cause it says so in one line.
     llm_max_tokens: int = 4096
 
     # --- Sinks ---

@@ -225,6 +225,7 @@ SIDEBAR = """<aside class="sidebar">
     {%- endif %}
     <a href="/leads"{% if active == "leads" %} class="nav-active"{% endif %}>Leads</a>
     {% endif %}
+    <a href="/announcement"{% if active == "announcement" %} class="nav-active"{% endif %}>Announcement</a>
     <a href="/blocked"{% if active == "blocked" %} class="nav-active"{% endif %}>Blocked users</a>
     <div class="nav-label">Knowledge base</div>
     {% set base = "#" if active == "kb" else "/#" %}
@@ -582,6 +583,95 @@ function addScenario() {
 </script>
 {% endblock %}"""
 
+# --- Announcement -------------------------------------------------------------
+ANNOUNCEMENT = """{% extends "shell" %}
+{% block head %}<style>
+  .ann-check { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+  .ann-check input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+  .ann-state { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600;
+    border-radius: 999px; padding: 5px 13px; border: 1px solid transparent; }
+  .ann-on { background: var(--ok-bg); border-color: rgba(46,204,113,.35); color: var(--ok); }
+  .ann-off { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.12); color: var(--muted); }
+  .ann-bubble { white-space: pre-wrap; word-break: break-word; background: rgba(0,202,255,.06);
+    border: 1px solid rgba(0,202,255,.22); border-radius: 14px; padding: 13px 15px; font-size: 14px;
+    line-height: 1.6; max-width: 460px; }
+  .ann-empty { color: var(--muted-2); font-style: italic; }
+</style>{% endblock %}
+{% block content %}
+<h1 class="page-title">Announcement</h1>
+<p class="lede">One extra message the bot sends <strong>on top of its normal reply</strong> &mdash; a free class,
+an admission deadline, an offer. Everyone the bot answers while this is switched on gets it
+<strong>once</strong>, as a second message, exactly as written here. Saving takes effect immediately.</p>
+<p class="lede" style="margin-top:-6px">This is <strong>not</strong> a broadcast to your old customers: Facebook only
+allows a message to someone who has written to the page within the last 24 hours, so the announcement rides along
+with a reply they asked for. Over a week or two that reaches everyone who is actually active.</p>
+
+{% if saved %}<div class="flash">Saved. {% if a.live %}The announcement is live &mdash; the next customer the bot answers will get it.{% else %}It is not being sent right now (switched off, or outside its dates).{% endif %}</div>{% endif %}
+
+<form method="post" action="/announcement">
+<input type="hidden" name="_csrf" value="{{ csrf }}">
+
+<section class="card">
+  <h2>Message</h2>
+  <p class="hint">Write it exactly as the customer should read it &mdash; the AI never rewrites this, so nothing
+    gets shortened and the link is never mangled. Keep it short: it lands under an answer they were waiting for.</p>
+  <label for="ann-text">Announcement text</label>
+  <textarea id="ann-text" name="text" placeholder="🎁 আগামী ১২ সেপ্টেম্বর, রাত ৯টায় আমাদের ফ্রী ক্লাস। যোগ দিতে নিচের লিংকে ক্লিক করুন 👇">{{ a.text }}</textarea>
+  <label for="ann-link">Link (optional)</label>
+  <input id="ann-link" type="text" name="link" value="{{ a.link }}" placeholder="https://...">
+  <p class="hint" style="margin-top:6px">Sent on its own line under the text, so Facebook shows a preview and it is easy to tap.</p>
+</section>
+
+<section class="card">
+  <h2>When</h2>
+  <p class="hint">Both dates are inclusive, Bangladesh time. Leave the end date empty and it keeps going until
+    you switch it off &mdash; setting it is the safer habit.</p>
+  <div class="grid">
+    <div><label for="ann-starts">Start date</label>
+      <input id="ann-starts" type="date" name="starts" value="{{ a.starts }}"></div>
+    <div><label for="ann-ends">End date</label>
+      <input id="ann-ends" type="date" name="ends" value="{{ a.ends }}"></div>
+  </div>
+  <label style="margin-top:18px">Switch</label>
+  <label class="ann-check" for="ann-enabled" style="margin:0">
+    <input id="ann-enabled" type="checkbox" name="enabled" value="1"{% if a.enabled %} checked{% endif %}>
+    Send this announcement
+  </label>
+</section>
+
+<section class="card">
+  <h2>Right now</h2>
+  <p class="hint">What the bot is doing with this at this moment.</p>
+  <p style="margin:14px 0 0">
+    {% if a.live %}<span class="ann-state ann-on">● Sending</span>
+    {% else %}<span class="ann-state ann-off">● Not sending</span>{% endif %}
+    <span class="hint" style="display:inline;margin-left:10px">
+      {%- if a.live %}Delivered to {{ a.sent_count }} customer(s) so far.
+      {%- elif not a.text %}Nothing written yet.
+      {%- elif not a.enabled %}Switched off.
+      {%- else %}Outside its dates &mdash; nothing is being sent.{% endif %}</span>
+  </p>
+  {% if a.text %}
+  <label style="margin-top:20px">What the customer sees</label>
+  <div class="ann-bubble">{{ a.text }}{% if a.link and a.link not in a.text %}
+
+{{ a.link }}{% endif %}</div>
+  {% else %}
+  <p class="ann-empty" style="margin-top:16px">Write the message above to see it here.</p>
+  {% endif %}
+  <p class="hint" style="margin-top:16px"><strong>Changing the wording starts a new announcement.</strong>
+    Everyone gets the new message, including the {{ a.sent_count }} who already had the old one &mdash; so fix
+    typos before switching it on, not after. Changing only the dates or the switch never resends.</p>
+</section>
+
+<div class="savebar"><div class="savebar-inner">
+  <span class="note">Changes apply instantly after saving.</span>
+  <span class="spacer"></span>
+  <button type="submit" class="btn-primary">Save changes</button>
+</div></div>
+</form>
+{% endblock %}"""
+
 # --- Blocked users ------------------------------------------------------------
 BLOCKED = """{% extends "shell" %}
 {% block head %}<style>
@@ -753,6 +843,7 @@ env = Environment(
         "login": LOGIN,
         "kb": KB,
         "prompt": PROMPT,
+        "announcement": ANNOUNCEMENT,
         "blocked": BLOCKED,
         "leads": LEADS,
         "forbidden": FORBIDDEN,

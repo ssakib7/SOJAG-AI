@@ -39,12 +39,16 @@ _semaphore: asyncio.Semaphore | None = None
 CACHE_BREAK = "<<<CACHE_BREAKPOINT>>>"
 CACHE_MIN_CHARS = 2000  # below this a cache write costs more than it saves (the routing hop)
 
-# Single-decision calls (the name-gender classifier, and anything else that answers in one
-# word) do not need reasoning, but Gemini 3.x flash still spent ~260 reasoning tokens on one
-# unless told otherwise — billed at the OUTPUT rate. This is the OpenRouter equivalent of the
-# thinking_budget=0 used on the native Gemini path. "minimal" is the floor the model accepts —
-# reasoning {"enabled": false} and {"max_tokens": 0} are both rejected with a 400.
-FAST_REASONING = {"effort": "minimal"}
+# Thinking is off on EVERY call, not just the single-decision ones. Reasoning tokens are
+# billed at the output rate, are invisible in the reply, and share llm_max_tokens with the
+# Bengali answer — so a run that thinks its way to the cap returns no text at all and the
+# customer sees nothing. The answers here come from a knowledge base already in the prompt;
+# they did not measurably improve for the thinking spent.
+#
+# On OpenRouter "minimal" is the floor the model accepts — reasoning {"enabled": false} and
+# {"max_tokens": 0} are both rejected with a 400. The native Gemini path takes the real zero
+# (thinking_budget=0).
+NO_REASONING = {"effort": "minimal"}
 
 # OpenRouter load-balances a model across every provider that hosts it, so a Gemini call can
 # land on a third-party host we have never tested — different quantisation, different tool-call
@@ -127,28 +131,25 @@ def _sentinel_stripping_gemini_cls() -> Any:
 def build_model(model_id: str | None = None, *, fast: bool = False) -> Any:
     """Build the configured Agno model (fresh instance per agent — they are not shared).
 
-    fast=True is for calls where latency beats depth — single-decision calls like the
-    name-gender classifier: a small output budget, and on Gemini a zero thinking budget
-    (measured: thinking tokens dominated the latency of calls that need none).
+    Every model this returns has thinking disabled (see NO_REASONING).
+
+    fast=True now only shrinks the output budget, for single-decision calls like the
+    name-gender classifier that answer in one word.
     """
     s = get_settings()
     mid = model_id or s.llm_model
     max_tokens = 512 if fast else s.llm_max_tokens
     if s.llm_provider == "openrouter":
         kwargs: dict[str, Any] = {"base_url": s.openrouter_api_base} if s.openrouter_api_base else {}
-        extra: dict[str, Any] = {}
-        if fast:
-            extra["reasoning"] = FAST_REASONING
+        extra: dict[str, Any] = {"reasoning": NO_REASONING}
         if "gemini" in mid.lower():
             extra["provider"] = GEMINI_PROVIDER_ROUTING
-        if extra:
-            kwargs["extra_body"] = extra
+        kwargs["extra_body"] = extra
         return _caching_openrouter_cls()(
             id=mid, api_key=s.openrouter_api_key, max_tokens=max_tokens, **kwargs
         )
-    kwargs = {"thinking_budget": 0} if fast else {}
     return _sentinel_stripping_gemini_cls()(
-        id=mid, api_key=s.gemini_api_key, max_output_tokens=max_tokens, **kwargs
+        id=mid, api_key=s.gemini_api_key, max_output_tokens=max_tokens, thinking_budget=0
     )
 
 
@@ -172,10 +173,10 @@ def _log_usage(label: str, result: Any) -> None:
     read = getattr(metrics, "cache_read_tokens", 0) or 0
     inp = getattr(metrics, "input_tokens", 0) or 0
     out = getattr(metrics, "output_tokens", 0) or 0
-    # Reasoning tokens are billed at the OUTPUT rate and are invisible in the reply, so
-    # they are the one line item nobody notices they are paying for. Broken out because
-    # "how much is thinking costing us, and how close is it to the cap" is not answerable
-    # from a total — and both answers decide whether to bound it (see build_model).
+    # Thinking is disabled in build_model, so this should read 0 on every line. It stays
+    # broken out precisely because it is supposed to be zero: reasoning tokens are billed at
+    # the OUTPUT rate, are invisible in the reply, and share the cap with the answer — a
+    # non-zero here means a provider ignored the override and is worth catching early.
     think = getattr(metrics, "reasoning_tokens", 0) or 0
     log.info(
         "%s tokens: input=%d cached=%d (%.0f%%) output=%d (thinking=%d, cap=%d)",

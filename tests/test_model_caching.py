@@ -1,12 +1,12 @@
-"""Prompt caching + the fast-path reasoning cap on the OpenRouter model.
+"""Prompt caching + the thinking-off override on the OpenRouter model.
 
 The rendered catalog makes the member system prompt ~22k tokens, whose stable half is
 resent byte-identical every turn. Gemini's implicit caching does not engage through
 OpenRouter, so the cache_control breakpoint below is what keeps the per-turn cost down
 (measured 5x). Caching is prefix-matched, so these tests pin WHERE the breakpoint lands:
 everything before CACHE_BREAK must be identical across members and across turns, or each
-variation writes its own 22k-token cache entry. The routing hop caps reasoning instead:
-it is a one-word decision that otherwise thinks.
+variation writes its own 22k-token cache entry. Thinking is separately pinned off on
+every path: reasoning tokens are billed at the output rate and share the reply's cap.
 """
 
 import pytest
@@ -17,7 +17,7 @@ from app.agents import factory
 from app.agents.model import (
     CACHE_BREAK,
     CACHE_MIN_CHARS,
-    FAST_REASONING,
+    NO_REASONING,
     GEMINI_PROVIDER_ROUTING,
     build_model,
 )
@@ -59,12 +59,11 @@ def test_user_turn_is_never_cached(openrouter):
     assert out["content"] == "x" * (CACHE_MIN_CHARS + 1)
 
 
-def test_fast_path_caps_reasoning(openrouter):
-    assert build_model(fast=True).extra_body["reasoning"] == FAST_REASONING
-
-
-def test_normal_path_sends_no_reasoning_override(openrouter):
-    assert "reasoning" not in (build_model().extra_body or {})
+def test_thinking_is_off_on_every_openrouter_call(openrouter):
+    # Not just the one-word specialists: a member turn that thinks its way to the cap
+    # returns no text at all, and the customer sees nothing.
+    assert build_model().extra_body["reasoning"] == NO_REASONING
+    assert build_model(fast=True).extra_body["reasoning"] == NO_REASONING
 
 
 def test_gemini_is_pinned_to_googles_own_endpoints(openrouter):
@@ -76,7 +75,8 @@ def test_gemini_is_pinned_to_googles_own_endpoints(openrouter):
 
 def test_non_gemini_models_are_left_to_openrouters_own_routing(openrouter):
     # The pin lists Google-only backends; sending it with anything else routes to nothing.
-    assert build_model("openai/gpt-4o-mini").extra_body is None
+    # The thinking override still rides along — it is not Gemini-specific.
+    assert "provider" not in build_model("openai/gpt-4o-mini").extra_body
 
 
 @pytest.fixture
@@ -87,7 +87,9 @@ def gemini(monkeypatch):
     return s
 
 
-def test_gemini_path_is_unchanged(gemini):
+def test_native_gemini_path_takes_the_real_zero_thinking_budget(gemini):
+    # OpenRouter's floor is "minimal"; the native API accepts an actual 0, on both paths.
+    assert build_model().thinking_budget == 0
     assert build_model(fast=True).thinking_budget == 0
 
 

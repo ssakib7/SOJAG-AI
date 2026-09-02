@@ -134,7 +134,7 @@ class GenderVerdict(BaseModel):
 def _gender() -> Agent:
     return Agent(
         name="GenderClassifier",
-        model=build_model(fast=True),  # one-word classification — no thinking needed
+        model=build_model(fast=True),  # one-word classification — a tiny output budget is plenty
         instructions=(
             "You classify Bangladeshi Facebook profile names by the gender a local reader would infer. "
             "Be conservative: answer unknown unless the name leaves no real doubt."
