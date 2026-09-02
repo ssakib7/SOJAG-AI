@@ -15,7 +15,7 @@ Facebook Page ──► FastAPI /webhook ──► per-sender queues ──► S
                                                               + PaymentVerifier / Vision / Gender agents
 Side effects (after the reply is sent): durable outbox ──► Google Sheet · Telegram
 Storage: Postgres 16 + pgvector (sessions, customers, leads ledger, outbox, config)
-Admin panel: /  /system-prompt  /announcement  /blocked  /leads (new)
+Admin panel: /  /system-prompt  /blocked  /leads (new)
 ```
 
 Everything left of the agent is deliberately *not* Agno — per-sender serialization,
@@ -84,18 +84,6 @@ messages. Scale the single process, never the replica count.
   edge, without stopping the container — the right move during an incident.
 - **Undo** on the knowledge-base editor restores the previous saved version; a save that
   would delete every course is refused outright.
-- **The announcement page** (`/announcement`, open to the editor account) holds one extra
-  message — a free class, a deadline, an offer — that the bot sends as a second bubble to
-  everyone it answers while the campaign is on, once each, for a window of dates. It is not
-  a broadcast, and deliberately cannot become one: Meta withdrew the Broadcast API, and a
-  promotional message to someone outside the 24-hour window fits no message tag, so
-  sending it puts the Page's messaging permission at risk. Riding along with a reply the
-  customer's own message triggered stays inside the window and needs no tag — over a
-  ten-day run that reaches everyone who is actually active. Who has already had it lives in
-  `announcement_sends`, keyed by a hash of the wording: sessions expire at four hours and
-  `recents` at seven days, so any flag kept there would re-advertise to the same person
-  every day, and editing the text starts a genuinely new campaign rather than silently
-  reaching nobody.
 
 Local development:
 

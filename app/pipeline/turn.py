@@ -40,7 +40,7 @@ from app.kb.defaults import (
 )
 from app.leads import outbox, sinks
 from app.meta import graph
-from app.ops import announce, blocklist, escalate, followups
+from app.ops import blocklist, escalate, followups
 from app.ops.attachments import fetch_attachment_image
 from app.utils.text import (
     NAME_UNKNOWN,
@@ -99,30 +99,6 @@ async def _human_send(sender_id: str, text: str, head_start_ms: int = 0) -> bool
     if wait > 0:
         await asyncio.sleep(wait / 1000)
     return await graph.send_message(sender_id, text)
-
-
-async def _send_announcement(sender_id: str) -> None:
-    """Ride the current announcement out on the back of a reply the customer just got.
-
-    Called after a DELIVERED reply and nowhere else. That ordering is the whole design:
-    the customer wrote in, we answered, so we are inside Meta's 24-hour window and no
-    message tag is needed — see ops/announce for why a real broadcast is not on offer.
-    A short beat first, so it arrives as a second bubble rather than racing the first.
-
-    Everything here is best-effort: an announcement that fails must never take a turn's
-    committed reply, lead or payment alert down with it.
-    """
-    if not announce.is_due(sender_id):
-        return
-    try:
-        await asyncio.sleep(_rand_between(900, 2000) / 1000)
-        if _human_took_over(sender_id, "the announcement"):
-            return
-        if await graph.send_message(sender_id, announce.message()):
-            await announce.mark_sent(sender_id)
-            log.info("📣 [%s] announcement delivered", sender_id)
-    except Exception as err:
-        log.error("📣 [%s] announcement failed: %s", sender_id, err)
 
 
 # --- Model-facing text for edits / replies (port of editedText / inboundText) ---
@@ -599,10 +575,6 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     state.mark_session_dirty(sender_id)
     if delivered:
         await _force_stop_if_off_topic(sender_id, session, turn)
-        # After the force-stop check, never before: someone being shown the door for
-        # off-topic messages is not who a free-class announcement is for.
-        if not session.get("closed"):
-            await _send_announcement(sender_id)
     else:
         # The closing line never landed, so don't start dropping their messages.
         await _alert_undelivered(sender_id, session, combined)
@@ -753,10 +725,6 @@ async def handle_entry_event(event: dict[str, Any]) -> None:
     delivered = await graph.send_message(sender_id, FALLBACK_GREETING)
     log.info("→ [%s] %s%s", sender_id, FALLBACK_GREETING, "" if delivered else "  [NOT DELIVERED]")
     state.mark_session_dirty(sender_id)
-    if delivered:
-        # Someone who just tapped an ad is exactly who a free-class announcement is for,
-        # and this is the one reply they are guaranteed to get.
-        await _send_announcement(sender_id)
 
 
 # A customer who fires off five photos is making ONE request, not five. Cap what one turn
@@ -1092,5 +1060,3 @@ async def handle_messaging_event(event: dict[str, Any], inbox: dict[str, Any] | 
     state.mark_session_dirty(sender_id)
     if delivered:
         await _force_stop_if_off_topic(sender_id, session, turn)
-        if not session.get("closed"):
-            await _send_announcement(sender_id)

@@ -170,23 +170,4 @@ class ShadowDraftRow(Base):
     text: Mapped[str] = mapped_column(Text, default="")
 
 
-class AnnouncementSendRow(Base):
-    """Who has already received which announcement — one row per person per campaign.
-
-    Deliberately its own table rather than a flag on the session or the customer: sessions
-    expire after four hours (state.SESSION_TTL_MS), so the same person would be told again
-    every afternoon for the whole run; `customers` only holds people who gave a phone
-    number; and `recents` is pruned at seven days, shorter than a typical campaign. The
-    campaign id is part of the key, so the NEXT announcement reaches everyone again with
-    no cleanup step to forget.
-    """
-
-    __tablename__ = "announcement_sends"
-
-    key: Mapped[str] = mapped_column(String(160), primary_key=True)  # "<campaign_id>:<sender_id>"
-    campaign_id: Mapped[str] = mapped_column(String(64), index=True)
-    sender_id: Mapped[str] = mapped_column(String(64), index=True)
-    at: Mapped[int] = mapped_column(BigInteger, default=0)  # epoch ms
-
-
 Index("ix_outbox_pending", OutboxRow.done, OutboxRow.not_before)

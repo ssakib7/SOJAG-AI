@@ -17,7 +17,7 @@ from app.db.engine import create_tables, dispose_engine
 from app.kb import config as kb_config
 from app.leads import outbox
 from app.meta import graph
-from app.ops import announce, blocklist, digest, followups, publish
+from app.ops import blocklist, digest, followups, publish
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -118,7 +118,6 @@ async def lifespan(app: FastAPI):
     await create_tables()
     await blocklist.load()
     await publish.load()
-    await announce.load()
     await state.load()
     await kb_config.reload()
     followups.restore()

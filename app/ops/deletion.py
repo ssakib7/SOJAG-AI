@@ -14,13 +14,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from app.db.engine import db_session
-from app.db.models import (
-    DeletionRow,
-    LeadRow,
-    NoticeRow,
-    OutboxRow,
-    PaymentClaimRow,
-)
+from app.db.models import DeletionRow, LeadRow, NoticeRow, OutboxRow, PaymentClaimRow
 
 MAX_ENTRIES = 5000
 
@@ -94,12 +88,6 @@ async def purge_business_records(sender_id: str) -> dict[str, int]:
             )
             counts[label] = result.rowcount or 0
         await db.commit()
-    # Not a ledger, but still a row that names this person: the record of which
-    # announcements they were sent. Owned by ops/announce because it also holds the
-    # in-memory copy, which would otherwise keep the person "already announced to".
-    from app.ops import announce
-
-    counts["announcements"] = await announce.forget(sender_id)
     return counts
 
 

@@ -32,7 +32,7 @@ from app.db.engine import db_session
 from app.db.models import LeadRow
 from app.kb import config as kb_config
 from app.kb import defaults
-from app.ops import announce, blocklist, publish
+from app.ops import blocklist, publish
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -291,42 +291,6 @@ async def prompt_save(request: Request) -> Response:
     await kb_config.reload()
     log.info("Bot behaviour reloaded from admin edit.")
     return RedirectResponse("/system-prompt?saved=1", status_code=302)
-
-
-# --- Announcement -------------------------------------------------------------
-@router.get("/announcement")
-async def announcement_page(request: Request) -> Response:
-    """Open to the editor as well as the admin. Announcing a free class is exactly the
-    day-to-day job the restricted account exists for, and gating it behind the owner's
-    login is how a campaign ends up not running."""
-    session, role, value = _auth(request)
-    if not session:
-        return RedirectResponse("/login", status_code=302)
-    return _render(
-        request, "announcement", title="Announcement", active="announcement",
-        user=session["u"], role=role, csrf=auth.csrf_token(value),
-        saved=request.query_params.get("saved") == "1",
-        a=announce.current(),
-    )
-
-
-@router.post("/announcement")
-async def announcement_save(request: Request) -> Response:
-    session, _, value = _auth(request)
-    if not session:
-        return RedirectResponse("/login", status_code=302)
-    body, csrf_ok = await _form(request)
-    if not csrf_ok:
-        return PlainTextResponse("Invalid CSRF token.", status_code=403)
-    await announce.save({
-        # An unchecked checkbox posts nothing at all, which is exactly "off".
-        "enabled": str(body.get("enabled") or "") == "1",
-        "text": _nl(body.get("text")),
-        "link": str(body.get("link") or ""),
-        "starts": str(body.get("starts") or ""),
-        "ends": str(body.get("ends") or ""),
-    }, by=session["u"])
-    return RedirectResponse("/announcement?saved=1", status_code=302)
 
 
 # --- Publish switch ----------------------------------------------------------
