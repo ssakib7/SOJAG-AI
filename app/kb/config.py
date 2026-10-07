@@ -22,7 +22,7 @@ from app.config import get_settings
 from app.db.engine import db_session
 from app.db.models import ConfigRow
 from app.kb import defaults
-from app.kb.catalog import backfill_admin_only, render_markdown
+from app.kb.catalog import backfill_admin_only, render_labeled
 
 # Hot-reloadable cache, rebuilt by reload() after every admin save and at boot.
 _cache: dict[str, Any] = {
@@ -111,7 +111,7 @@ def build_system_prompt(
         + sections_block
         + defaults.STRICT_ADHERENCE
         + defaults.KB_SEPARATOR
-        + render_markdown(kb)
+        + render_labeled(kb)
         + defaults.KB_FOOTER
     )
 

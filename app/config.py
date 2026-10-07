@@ -15,6 +15,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 FALSEY = re.compile(r"^(false|0|off|no)$", re.IGNORECASE)
 
+# Models measured as unable to drive our tool list. The failure is invisible from outside —
+# fluent replies, green health, zero leads — so it is checked at boot rather than discovered
+# from an empty sheet a week later. Substring match: the same model arrives as bare
+# "gemini-3.1-flash-lite" on the native path and "google/gemini-3.1-flash-lite" via OpenRouter.
+TOOL_BLIND_MODELS = ("gemini-3.1-flash-lite",)
+
+
+def is_tool_blind(model_id: str) -> bool:
+    mid = (model_id or "").strip().lower()
+    return any(bad in mid for bad in TOOL_BLIND_MODELS)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -38,7 +49,14 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     llm_provider: str = "gemini"     # gemini | openrouter
-    llm_model: str = "gemini-3.1-flash-lite"
+    # The default must be a model that can CALL TOOLS, which is not a given in this family
+    # and is not visible from the outside when it is missing. gemini-3.1-flash-lite was the
+    # default here and scores 0/8 on our own tool suite: handed a name and a mobile number it
+    # never calls save_lead, and told "টাকা পাঠিয়েছি" it replies "আপনার পেমেন্টের তথ্যটি পেয়েছি"
+    # — the exact sentence PAYMENTS_POLICY forbids — without ever calling report_payment. The
+    # bot chats on, /health stays green, and every lead and payment claim is silently dropped.
+    # See TOOL_BLIND_MODELS below, which turns that into a loud boot warning.
+    llm_model: str = "gemini-3.7-flash"
     gemini_api_key: str = ""
     openrouter_api_key: str = ""
     openrouter_api_base: str = ""    # test stub override; production leaves it unset
@@ -46,7 +64,12 @@ class Settings(BaseSettings):
     # answer; a turn is one model call now (two when it uses a tool), so the ceiling has
     # room to spare. 30s was cutting off legitimate generations, which then retried, paid
     # twice, and still fell back to the error line.
-    llm_timeout_seconds: int = 60
+    #
+    # 120s, per attempt: 60 still timed out live (2026-10-07, "TimeoutError" on a plain
+    # "আসসালামু আলাইকুম" while the provider was slow), and a slow answer beats none — the
+    # customer gets silence on a failure, never an apology. model.guarded retries a timeout
+    # once, so the worst case is ~4 minutes before the team is paged.
+    llm_timeout_seconds: int = 120
     llm_max_concurrent: int = 25
     # The budget for the Bengali reply; 1024 truncated replies.
     #
@@ -192,6 +215,14 @@ class Settings(BaseSettings):
             )
         if not self.memory_on:
             warnings.append("MEMORY_ENABLED=false — every chat starts fresh and no customer is recalled.")
+        if is_tool_blind(self.llm_model):
+            warnings.append(
+                f"LLM_MODEL={self.llm_model} CANNOT RELIABLY CALL TOOLS (measured 0/8). The bot "
+                "will answer customers normally, but save_lead, report_payment, notify_team and "
+                "end_conversation will never fire: leads are dropped, payment claims reach nobody, "
+                "and angry customers are never escalated — with no error anywhere. Use a model "
+                "verified on the tool suite (gemini-3.7-flash, gemini-3.5-flash-lite)."
+            )
         if self.shadow_mode:
             warnings.append("SHADOW_MODE=true — the bot will NOT reply to anyone and no lead will be delivered.")
         if self.followup_delay_minutes >= 1440:

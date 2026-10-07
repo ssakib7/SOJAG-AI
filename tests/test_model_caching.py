@@ -1,12 +1,12 @@
-"""Prompt caching + the thinking-off override on the OpenRouter model.
+"""Prompt caching, provider pinning, and the thinking-off override on the OpenRouter model.
 
-The rendered catalog makes the member system prompt ~22k tokens, whose stable half is
-resent byte-identical every turn. Gemini's implicit caching does not engage through
-OpenRouter, so the cache_control breakpoint below is what keeps the per-turn cost down
-(measured 5x). Caching is prefix-matched, so these tests pin WHERE the breakpoint lands:
-everything before CACHE_BREAK must be identical across members and across turns, or each
-variation writes its own 22k-token cache entry. Thinking is separately pinned off on
-every path: reasoning tokens are billed at the output rate and share the reply's cap.
+The rendered catalog makes the system prompt ~13k tokens, whose stable half is resent
+byte-identical every turn, so the cache_control breakpoint is what keeps the per-turn cost
+down — measured 8.2x on the live API ($0.001248 with it, $0.010211 without, same call).
+Caching is prefix-matched, so these tests pin WHERE the breakpoint lands: everything before
+CACHE_BREAK must be identical across turns, or each variation writes its own cache entry.
+Thinking is separately pinned off on every path: reasoning tokens are billed at the output
+rate and share the reply's cap.
 """
 
 import pytest
@@ -71,6 +71,36 @@ def test_gemini_is_pinned_to_googles_own_endpoints(openrouter):
     # normal and the fast path must carry the pin — the routing hop is a real customer turn.
     assert build_model().extra_body["provider"] == GEMINI_PROVIDER_ROUTING
     assert build_model(fast=True).extra_body["provider"] == GEMINI_PROVIDER_ROUTING
+
+
+def test_provider_pin_keeps_both_the_allowlist_and_the_preference_order():
+    """`only` and `order` do different jobs and dropping either one costs something real.
+
+    `only` is the safety allowlist — without it a Gemini call can be served by a
+    third-party host we have never tested. `order` is the preference walk; the pin carried
+    `only` alone for a while, and because an allowlist expresses no preference the traffic
+    sat on the full-price standard lane while the flex lanes led the list. Restoring the
+    order took a measured turn from ~7.9s to ~2.1s.
+    """
+    assert set(GEMINI_PROVIDER_ROUTING) == {"only", "order", "allow_fallbacks"}
+    assert GEMINI_PROVIDER_ROUTING["only"] == GEMINI_PROVIDER_ROUTING["order"], (
+        "the allowlist and the preference walk must cover exactly the same lanes — a lane "
+        "in `order` but not `only` is refused, and one in `only` but not `order` is unranked"
+    )
+    # allow_fallbacks lets a full flex lane fall through to the standard lane on the same
+    # backend rather than failing the customer's turn. `only` still bounds where it can land.
+    assert GEMINI_PROVIDER_ROUTING["allow_fallbacks"] is True
+    assert all(lane.startswith(("google-ai-studio", "google-vertex"))
+               for lane in GEMINI_PROVIDER_ROUTING["only"]), "the pin must stay Google-only"
+
+
+def test_the_cheap_lanes_are_preferred_over_the_full_price_ones():
+    # The flex lanes are half price. They are only worth listing if they are listed FIRST.
+    order = GEMINI_PROVIDER_ROUTING["order"]
+    flex = [i for i, lane in enumerate(order) if lane.endswith("/flex")]
+    standard = [i for i, lane in enumerate(order) if not lane.endswith("/flex")]
+    assert flex and standard, "the pin should carry both a flex and a full-price lane"
+    assert max(flex) < min(standard), f"flex lanes must come first, got {order}"
 
 
 def test_non_gemini_models_are_left_to_openrouters_own_routing(openrouter):

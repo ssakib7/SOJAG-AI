@@ -23,12 +23,16 @@ T = TypeVar("T")
 
 _semaphore: asyncio.Semaphore | None = None
 
-# Prompt caching. The rendered catalog makes the member system prompt ~22k tokens and its
-# stable half is byte-identical every turn, so without a cache breakpoint we pay full input
-# rate to resend it. Gemini's implicit caching does NOT engage through OpenRouter (measured:
-# cached_tokens=0 on repeat identical calls) — an explicit cache_control breakpoint is
-# required, and it takes the per-turn cost from $0.0051 to $0.0010. Only the system message is
-# marked: it is the one part of the request that is stable across turns.
+# Prompt caching. The rendered catalog makes the system prompt ~13k tokens and its stable
+# half is byte-identical every turn, so without a cache breakpoint we pay full input rate to
+# resend it. The explicit cache_control breakpoint below is measured at 8.2x on the live API:
+# $0.001248 with it against $0.010211 without, on the same 13,095-token call.
+#
+# Gemini's implicit caching DOES engage through OpenRouter now (a breakpoint-free flash-lite
+# call came back with cached_tokens=12252 of 13095), which was not true when this was written.
+# The explicit breakpoint still wins — it cached 13,083 against implicit caching's 12,252, and
+# it puts the cache boundary where WE want it rather than wherever the provider infers one — so
+# it stays. Only the system message is marked: it is the one stable part of the request.
 #
 # Caching is PREFIX-matched, so WHERE the breakpoint sits decides the hit rate. A system
 # message may carry CACHE_BREAK to mean "cache everything up to here": the team members put
@@ -45,23 +49,42 @@ CACHE_MIN_CHARS = 2000  # below this a cache write costs more than it saves (the
 # customer sees nothing. The answers here come from a knowledge base already in the prompt;
 # they did not measurably improve for the thinking spent.
 #
-# On OpenRouter "minimal" is the floor the model accepts — reasoning {"enabled": false} and
-# {"max_tokens": 0} are both rejected with a 400. The native Gemini path takes the real zero
-# (thinking_budget=0).
+# On OpenRouter "minimal" is the floor the model accepts, and this is still true: {"enabled":
+# false}, {"max_tokens": 0} and {"effort": "none"} are each refused with a 400, "Reasoning is
+# mandatory for this endpoint and cannot be disabled." The native Gemini path takes the real
+# zero (thinking_budget=0).
+#
+# "minimal" is a floor, not an off switch: gemini-3.7-flash still returned 130-230 reasoning
+# tokens on some turns (most often ones that end in a tool call) while reporting the setting
+# as honoured. That is why _log_usage breaks `thinking` out on every line — the leak is real,
+# it is billed at the output rate, and the log is the only place it is visible.
 NO_REASONING = {"effort": "minimal"}
 
 # OpenRouter load-balances a model across every provider that hosts it, so a Gemini call can
 # land on a third-party host we have never tested — different quantisation, different tool-call
-# behaviour, different latency tail. Pin Gemini traffic to Google's own endpoints. Order is the
-# preference order OpenRouter walks: the flex lanes first (cheaper), each falling through to
-# the standard lane on the same backend.
+# behaviour, different latency tail. Pin Gemini traffic to Google's own endpoints.
+#
+# BOTH keys are needed, and they do different jobs. `only` is a hard allowlist and is the
+# safety property: a provider outside it is refused with a 404 rather than silently served,
+# verified against a deliberately bogus pin, and it holds even with allow_fallbacks on. But
+# `only` does NOT express a preference — an earlier comment here claimed it did, and the
+# measured consequence was that traffic landed on the standard lane while the cheaper flex
+# lane sat first in the list doing nothing.
+#
+# `order` is the actual preference walk. Adding it moved calls onto google-ai-studio and took
+# a measured turn from ~7.9s to ~2.1s at equal or lower cost. allow_fallbacks stays True so a
+# flex lane that is out of capacity falls through to the standard lane on the same backend
+# instead of failing the customer's turn — the allowlist still bounds where it can fall to.
+_GEMINI_LANES = [
+    "google-ai-studio/flex",       # cheapest; 50% off the standard lane
+    "google-vertex/global/flex",
+    "google-ai-studio",            # full price, fallen through to only when flex is full
+    "google-vertex/global",
+]
 GEMINI_PROVIDER_ROUTING: dict[str, Any] = {
-    "only": [
-        "google-ai-studio/flex",
-        "google-ai-studio",
-        "google-vertex/global",
-        "google-vertex/global/flex",
-    ]
+    "only": _GEMINI_LANES,
+    "order": _GEMINI_LANES,
+    "allow_fallbacks": True,
 }
 
 
@@ -191,8 +214,8 @@ def _log_usage(label: str, result: Any) -> None:
 
 
 # LLM health, surfaced on /health and alerted on. A quota exhaustion or a revoked key
-# looks exactly like a healthy bot from the outside: every customer simply gets the "can't
-# answer right now" line, forever, and nobody is told.
+# looks exactly like a healthy bot from the outside: every customer simply gets no reply,
+# forever, and nobody is told.
 llm_stats: dict[str, Any] = {"failed_since_boot": 0, "consecutive_failures": 0, "last_error": None}
 ALERT_AFTER_CONSECUTIVE_FAILURES = 5
 _alerted_down = False
@@ -212,12 +235,12 @@ def _record_llm_result(ok: bool, err: BaseException | None = None) -> None:
     llm_stats["last_error"] = str(err)[:300] if err else None
     if llm_stats["consecutive_failures"] >= ALERT_AFTER_CONSECUTIVE_FAILURES and not _alerted_down:
         _alerted_down = True
-        log.error("⚠ LLM DOWN — %d consecutive failures. Customers are getting the fallback line.",
+        log.error("⚠ LLM DOWN — %d consecutive failures. Customers are getting no reply.",
                   llm_stats["consecutive_failures"])
         _notify(
             "🚨 De Jure bot: the AI model has failed "
             f"{llm_stats['consecutive_failures']} times in a row.\n"
-            "Every customer is now getting “দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না”.\n"
+            "Customers are getting NO reply at all (the bot stays silent rather than apologise).\n"
             "Please answer from the Page inbox and check the model provider "
             f"(quota/billing/API key).\nLast error: {llm_stats['last_error']}"
         )
@@ -248,7 +271,14 @@ async def guarded(run: Callable[[], Awaitable[T]], label: str = "llm") -> T:
                 delay = 0.5 + random.random()
                 log.warning("%s transient failure (%s) — retrying in %.1fs", label, err, delay)
                 await asyncio.sleep(delay)
-                result = await asyncio.wait_for(run(), timeout)
+                try:
+                    result = await asyncio.wait_for(run(), timeout)
+                except asyncio.TimeoutError as again:
+                    # A bare TimeoutError stringifies to "", which reached the team alert as
+                    # "TimeoutError:" and told them nothing. Say what actually happened.
+                    raise asyncio.TimeoutError(
+                        f"no answer from the model within {timeout}s, twice"
+                    ) from again
         except BaseException as err:
             _record_llm_result(False, err)
             raise
