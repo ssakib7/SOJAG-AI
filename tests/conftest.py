@@ -47,6 +47,19 @@ def clean_state():
 
 
 @pytest.fixture(autouse=True)
+def no_thread_lookup(monkeypatch):
+    """Every text turn reads the Facebook thread (turn._absorb_page_messages). Unstubbed,
+    a test that drives a turn would reach out to graph.facebook.com and wait out the
+    timeout. Tests about the thread lookup patch this again with the thread they need."""
+    from app.meta import graph
+
+    async def empty_thread(sender_id):
+        return []
+
+    monkeypatch.setattr(graph, "fetch_thread_messages", empty_thread)
+
+
+@pytest.fixture(autouse=True)
 def reset_graph_client():
     """Drop the shared Graph httpx client between tests.
 

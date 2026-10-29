@@ -24,6 +24,7 @@ class TurnContext:
     transcript: str = ""               # rendered conversation: payment verifier + the member's own prompt
     history_turns: int = 0             # committed messages before this one; 0 = nothing said yet
     replied_turns: int = 0             # of those, how many are OURS; 0 = we have never answered
+    page_turns: int = 0                # of those, how many the PAGE sent (ad message, colleague)
     profile: dict[str, Any] | None = None
     ask_contact: bool = False          # deterministic contact-ask fires this turn
     offered_phone: str | None = None   # valid BD number the customer actually typed

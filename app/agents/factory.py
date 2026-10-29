@@ -31,6 +31,7 @@ a draft discarded by the regeneration loop leaves no trace anywhere Agno might r
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Callable
 
@@ -45,6 +46,8 @@ from app.kb import config as kb_config
 from app.utils.text import real_name
 
 log = logging.getLogger(__name__)
+
+DHAKA = timezone(timedelta(hours=6))  # Bangladesh keeps no daylight saving
 
 
 # --- Per-turn dynamic instruction blocks (port of askLLM's instruction assembly) ---
@@ -77,6 +80,16 @@ def _dynamic_blocks(turn: TurnContext) -> str:
                 "line, and also arrives as your user turn.\nRead it before you reply: do NOT "
                 "greet, do NOT welcome, do NOT say স্বাগতম, do NOT re-introduce De Jure Academy, "
                 "and do not repeat a fact, a price, or a question you have already given.\n\n"
+            )
+        elif turn.history_turns == turn.page_turns:
+            # Only Page messages so far: the conversation opened with an ad's automatic
+            # question (or a comment reply), and the customer's message answers it.
+            out += (
+                "The conversation opened with a message from our Page (shown below as Page) — "
+                "usually the automatic question of the Facebook ad the customer clicked. You did "
+                "not write it, and you have not replied yet. The customer's newest message, the "
+                "last line, is their answer to it: read it in the light of that Page message, and "
+                "if the Page message is one listed in the Ad entry points, follow that entry.\n\n"
             )
         else:
             out += (
@@ -127,6 +140,12 @@ def _dynamic_blocks(turn: TurnContext) -> str:
     else:
         which = "স্যার (Sir in a Banglish reply) — their gender is not known"
     out += f"\n\n=== THIS CUSTOMER'S HONORIFIC ===\n{which}."
+
+    # Today's date, which the admin DATES rule reads from this block. Without it every
+    # "next Thursday" and every "the class is on 5 November" was reasoned from no date at
+    # all. Dynamic, so it sits after CACHE_BREAK like everything else here.
+    today = datetime.now(DHAKA)
+    out += f"\n\n=== CURRENT DATE ===\nToday is {today:%A}, {today.day} {today:%B %Y} (Bangladesh time)."
     return out
 
 
@@ -254,7 +273,7 @@ def _history_messages(session: dict) -> list[Message]:
     out: list[Message] = []
     for h in session.get("history") or []:
         text = "".join(p.get("text") or "" for p in (h.get("parts") or []))
-        role = "assistant" if h.get("role") == "model" else "user"
+        role = {"model": "assistant", "page": "page"}.get(h.get("role"), "user")
         if out and out[-1].role == role:
             out[-1].content = f"{out[-1].content}\n{text}"
         else:
@@ -262,8 +281,15 @@ def _history_messages(session: dict) -> list[Message]:
     return out
 
 
+_SPEAKERS = {
+    "assistant": "Assistant",
+    # Not written by you: the ad's automatic message, a comment reply, or a colleague.
+    "page": "Page (sent from our Page, not by you)",
+}
+
+
 def _render_transcript(history: list[Message], user_text: str) -> str:
-    lines = [f"{'Assistant' if m.role == 'assistant' else 'Customer'}: {m.content}" for m in history]
+    lines = [f"{_SPEAKERS.get(m.role, 'Customer')}: {m.content}" for m in history]
     lines.append(f"Customer (latest message): {user_text}")
     return "\n".join(lines)
 
@@ -309,6 +335,7 @@ async def run_turn(turn: TurnContext) -> str:
     turn.transcript = _render_transcript(history, turn.combined_text)
     turn.history_turns = len(history)
     turn.replied_turns = sum(1 for m in history if m.role == "assistant")
+    turn.page_turns = sum(1 for m in history if m.role == "page")
 
     token = current_turn.set(turn)
     try:

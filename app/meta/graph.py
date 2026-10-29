@@ -323,6 +323,57 @@ async def fetch_profile_name(sender_id: str) -> str | None:
     return (await fetch_profile(sender_id)).get("name")
 
 
+# The thread itself, for the Page messages the bot never hears about through the webhook:
+# the automatic question a Click-to-Messenger ad posts, a comment private reply, a
+# colleague's reply. Meta stores them in the thread, and the Conversations API is the only
+# place we can read them back.
+PAGE_MESSAGES_FETCH = 8
+PAGE_MESSAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+
+async def fetch_thread_messages(sender_id: str) -> list[dict[str, Any]]:
+    """This customer's recent thread, oldest first, as {"id", "text", "at", "from_page"}.
+    Never raises: a failure returns [] and the turn runs exactly as it would without it."""
+    s = get_settings()
+    if not s.fb_page_id:
+        return []
+    try:
+        res = await client().get(
+            f"{s.graph_api_base}/{s.fb_page_id}/conversations",
+            params={
+                "platform": "messenger",
+                "user_id": sender_id,
+                "fields": f"messages.limit({PAGE_MESSAGES_FETCH}){{id,message,from,created_time}}",
+                "access_token": s.lookup_token,
+            },
+            timeout=3.0,
+        )
+        if res.status_code >= 400:
+            log.warning("Thread lookup refused: %s %s", res.status_code, res.text[:160])
+            return []
+        convos = res.json().get("data") or []
+    except Exception as err:
+        log.warning("Thread lookup failed: %s", err)
+        return []
+
+    cutoff = time.time() * 1000 - PAGE_MESSAGE_MAX_AGE_MS
+    out: list[dict[str, Any]] = []
+    for m in ((convos[0].get("messages") or {}).get("data") or []) if convos else []:
+        try:
+            at = int(datetime.strptime(m.get("created_time") or "", "%Y-%m-%dT%H:%M:%S%z").timestamp() * 1000)
+        except ValueError:
+            continue
+        if at >= cutoff:
+            out.append({
+                "id": m.get("id") or "",
+                "text": (m.get("message") or "").strip(),
+                "at": at,
+                "from_page": (m.get("from") or {}).get("id") == s.fb_page_id,
+            })
+    out.reverse()  # Meta lists newest first; reversing keeps same-second messages in order
+    return out
+
+
 def _inbox_url_fallback(sender_id: str) -> str | None:
     """PSID-based Business Suite link. Business Suite does NOT resolve the new 17-digit
     PSIDs, so this is only the last-resort fallback; prefer the Conversations API link."""

@@ -8,12 +8,13 @@ recalled — every chat starts fresh.
 
 Session shape (a plain dict, JSON-serializable — the live follow-up task is never
 serialized; ops/followups re-arms from last_active on boot):
-  { history: [{role: "user"|"model", parts: [{text}]}],   # legacy Gemini shape, kept for
+  { history: [{role: "user"|"model"|"page", parts: [{text}]}],  # legacy Gemini shape, kept for
     last_active: ms,                                       # painless migration from bot.db.json
     lead: {captured, name, asked, msg_count},
     followup_sent: bool, returning: bool, customer_name: str|None,
     recent_mids: [{mid, text}], payments: [key], non_text_prompted_at: ms,
-    closed: bool }                                         # force-stopped by the off-topic rule
+    closed: bool,                                          # force-stopped by the off-topic rule
+    page_mids: [mid] }                                     # Page messages already in history
 """
 
 from __future__ import annotations
@@ -242,6 +243,22 @@ def remember_unanswered(session: dict[str, Any], user_text: str) -> None:
     session["history"].append({"role": "user", "parts": [{"text": user_text}]})
     if len(session["history"]) > MAX_HISTORY:
         del session["history"][: len(session["history"]) - MAX_HISTORY]
+
+
+PAGE_MIDS_MAX = 30
+
+
+def remember_page_message(session: dict[str, Any], mid: str, text: str) -> None:
+    """Commit a message the PAGE sent that the bot did not write: an ad's automatic
+    question, a comment private reply, a colleague's reply. Without it the customer's
+    "হ্যাঁ" reaches the model answering nothing. The mid is kept so the same message is
+    never added twice."""
+    session["history"].append({"role": "page", "parts": [{"text": text}]})
+    if len(session["history"]) > MAX_HISTORY:
+        del session["history"][: len(session["history"]) - MAX_HISTORY]
+    seen = session.setdefault("page_mids", [])
+    seen.append(mid)
+    del seen[: max(0, len(seen) - PAGE_MIDS_MAX)]
 
 
 def record_recent(sender_id: str, last_message: object) -> None:

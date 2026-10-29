@@ -57,10 +57,14 @@ def _graph_stub(monkeypatch, sent: list[str]):
     async def fake_inbox_url(sender_id):
         return None
 
+    async def fake_thread(sender_id):
+        return []
+
     monkeypatch.setattr(graph, "send_message", fake_send)
     monkeypatch.setattr(graph, "send_action", fake_action)
     monkeypatch.setattr(graph, "fetch_profile", fake_profile)
     monkeypatch.setattr(graph, "resolve_inbox_url", fake_inbox_url)
+    monkeypatch.setattr(graph, "fetch_thread_messages", fake_thread)
 
 
 def _delivering_graph_stub(monkeypatch, sent: list[str]):

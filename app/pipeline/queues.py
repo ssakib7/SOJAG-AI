@@ -75,7 +75,13 @@ def is_human_takeover(event: dict[str, Any]) -> bool:
     and this is never even called — which is exactly how the bot talked over the team for
     a week while every other part of the handover worked. _log_echo below makes that
     visible instead of silent.
+
+    The automatic question a Click-to-Messenger ad posts also echoes back with no app_id.
+    It is Meta's automation, not a colleague: an echo carrying one of the messages in the
+    knowledge base's "Ad entry points" section is not a takeover, or every ad lead would
+    open with the bot paused.
     """
+    from app.kb import ad_entries
     from app.meta import graph
 
     message = event.get("message") or {}
@@ -83,19 +89,29 @@ def is_human_takeover(event: dict[str, Any]) -> bool:
         return False
     if graph.was_sent_by_us(message.get("mid")):
         return False
+    if ad_entries.is_ad_message(message.get("text")):
+        return False
     return not message.get("app_id")
 
 
 def _log_echo(event: dict[str, Any], takeover: bool) -> None:
     """Every echo, one line. Echoes used to be dropped in silence, so "the bot is talking
     over us" and "Meta never sent us an echo" looked identical from the logs."""
+    from app.kb import ad_entries
+
     message = event.get("message") or {}
+    if takeover:
+        verdict = "HUMAN TAKEOVER"
+    elif not message.get("app_id") and ad_entries.is_ad_message(message.get("text")):
+        verdict = "ad message, ignored"
+    else:
+        verdict = "our own send, ignored"
     log.info(
         "echo [%s] app_id=%s mid=%s → %s",
         (event.get("recipient") or {}).get("id") or "unknown",
         message.get("app_id") or "-",
         message.get("mid") or "-",
-        "HUMAN TAKEOVER" if takeover else "our own send, ignored",
+        verdict,
     )
 
 

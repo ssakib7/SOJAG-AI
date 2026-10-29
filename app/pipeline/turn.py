@@ -29,9 +29,11 @@ from app.agents.turn_context import TurnContext
 from app.config import get_settings
 from app.db import state
 from app.kb import config as kb_config
+from app.kb.ad_entries import normalize
 from app.kb.defaults import (
     FALLBACK_ATTACHMENT,
     FALLBACK_ESCALATED,
+    FALLBACK_FOLLOWUP,
     FALLBACK_GREETING,
     FALLBACK_LEAD_RETRY,
     FALLBACK_LEAD_THANKS,
@@ -484,6 +486,9 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     await asyncio.sleep(_rand_between(800, 2500) / 1000)
     await graph.send_action(sender_id, "mark_seen")
     texts.extend(_drain_texts(inbox, sender_id, session))  # bubbles from the reading beat
+    # The question this message may be answering — an ad's automatic message — is in the
+    # Facebook thread, not in anything the webhook delivered.
+    await _absorb_page_messages(sender_id, session)
 
     # Pictures sent with the message join this turn rather than opening their own.
     photos = await _collect_photos(sender_id, _drain_images(inbox, sender_id, MAX_BURST_IMAGES))
@@ -677,6 +682,50 @@ async def _prompt_for_text(sender_id: str, session: dict[str, Any]) -> None:
     log.info("→ [%s] %s", sender_id, FALLBACK_NON_TEXT)
 
 
+# Meta's own notices in the thread, not words anyone sent the customer.
+_THREAD_NOTICES = ("replied to an ad", "responding to a user comment")
+PAGE_MESSAGE_MAX_CHARS = 600
+
+
+async def _absorb_page_messages(sender_id: str, session: dict[str, Any]) -> int:
+    """Bring into history what the Page said right before the customer's latest message.
+
+    The webhook delivers the customer's "হ্যাঁ" but not the question it answers: an ad's
+    automatic message, a comment private reply, a colleague's reply from the inbox. Those
+    live only in the Facebook thread. This reads the thread and takes the run of Page
+    messages directly before the customer's newest message(s), skipping our own replies
+    and anything already in history. Returns how many it added; 0 on any failure."""
+    thread = await graph.fetch_thread_messages(sender_id)
+    i = len(thread) - 1
+    while i >= 0 and not thread[i]["from_page"]:
+        i -= 1  # the customer's current burst
+    run: list[dict[str, Any]] = []
+    while i >= 0 and thread[i]["from_page"]:
+        run.append(thread[i])
+        i -= 1
+    if not run:
+        return 0
+
+    ours = {
+        normalize("".join(p.get("text") or "" for p in h.get("parts") or []))
+        for h in session.get("history") or [] if h.get("role") in ("model", "page")
+    } | {normalize(t) for t in (FALLBACK_GREETING, FALLBACK_FOLLOWUP, FALLBACK_LEAD_THANKS)}
+    seen = set(session.get("page_mids") or [])
+    added = 0
+    for m in reversed(run):  # oldest first
+        text = m["text"]
+        if (not text or m["id"] in seen or graph.was_sent_by_us(m["id"])
+                or normalize(text) in ours
+                or any(n in text.lower() for n in _THREAD_NOTICES)):
+            continue
+        state.remember_page_message(session, m["id"], text[:PAGE_MESSAGE_MAX_CHARS])
+        log.info("📣 [%s] page message added to context: %s", sender_id, short_note(text))
+        added += 1
+    if added:
+        state.mark_session_dirty(sender_id)
+    return added
+
+
 def _entry_ref(event: dict[str, Any]) -> dict[str, Any]:
     """The ad/entry attribution Meta attaches when someone arrives from a Click-to-
     Messenger ad, an m.me link, or the Get Started button."""
@@ -714,6 +763,11 @@ async def handle_entry_event(event: dict[str, Any]) -> None:
     # Only greet on the OPENING event. Meta also sends postbacks for buttons inside a
     # running conversation; answering those with a greeting would talk over the thread.
     if session.get("greeted") or session.get("history"):
+        return
+    # An ad that opens with its own question has already spoken first. Our welcome on top
+    # of it would talk over the question the customer is about to answer; the question is
+    # kept in history instead, so their reply is answered in its light.
+    if entry["adId"] and await _absorb_page_messages(sender_id, session):
         return
     session["greeted"] = True
     followups.schedule(sender_id, session)
