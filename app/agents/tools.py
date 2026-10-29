@@ -26,7 +26,18 @@ from app.utils.text import find_trx_id, normalize_phone, short_note
 log = logging.getLogger(__name__)
 
 
-def save_lead(name: str, phone: str, interest: str, remarks: str) -> dict:
+def _class_mode(raw: object) -> str:
+    """The free-class choice as the Sheet's FILTER tabs expect it: "Online", "Offline" or ""."""
+    s = str(raw or "").strip().lower()
+    if any(w in s for w in ("offline", "অফলাইন", "campus", "ক্যাম্পাস")):
+        return "Offline"
+    if any(w in s for w in ("online", "অনলাইন", "zoom")):
+        return "Online"
+    return ""
+
+
+def save_lead(name: str, phone: str, interest: str, remarks: str,
+              class_mode: str = "") -> dict:
     """Save a customer's contact details so a human representative can follow up. Call this ONLY
     after the customer has provided BOTH their name and their Bangladeshi mobile number in the
     conversation. Never invent or guess these values. Also summarise, for the human
@@ -42,6 +53,8 @@ def save_lead(name: str, phone: str, interest: str, remarks: str) -> dict:
             this customer on the call: unanswered questions, objections or hesitation, how
             urgent they seem, any preferred contact time. Write "তেমন কিছু জানা যায়নি" if
             there is nothing useful to add.
+        class_mode: Only for a free class registration: "online" or "offline", as the customer
+            chose. Leave empty for every other lead.
     """
     turn = get_turn()
     clean_name = str(name or "").strip()
@@ -49,10 +62,11 @@ def save_lead(name: str, phone: str, interest: str, remarks: str) -> dict:
     valid = len(clean_name) >= 2 and bool(resolved_phone)
     clean_interest = short_note(interest)
     clean_remarks = short_note(remarks)
+    clean_mode = _class_mode(class_mode)
     log.info(
-        'save_lead: name="%s" phone="%s" %s | interest="%s" | remarks="%s"',
+        'save_lead: name="%s" phone="%s" %s | interest="%s" | remarks="%s" | class=%s',
         clean_name, resolved_phone or phone or "", "valid" if valid else "REJECTED (bad name/phone)",
-        clean_interest, clean_remarks,
+        clean_interest, clean_remarks, clean_mode or "-",
     )
     if not valid:
         turn.lead_invalid = True
@@ -60,7 +74,8 @@ def save_lead(name: str, phone: str, interest: str, remarks: str) -> dict:
             "status": "invalid_phone",
             "note": "Not a valid Bangladeshi mobile number — ask the customer to resend it.",
         }
-    turn.lead = {"name": clean_name, "phone": resolved_phone, "interest": clean_interest, "remarks": clean_remarks}
+    turn.lead = {"name": clean_name, "phone": resolved_phone, "interest": clean_interest, "remarks": clean_remarks,
+                 "classMode": clean_mode}
     return {"status": "ok", "note": "Saved. A representative will follow up shortly."}
 
 

@@ -76,6 +76,7 @@ async def send_lead_to_telegram(lead: dict[str, Any]) -> bool:
         f"Phone: {lead.get('phone')}\n"
         + (f"Interested in: {lead['interest']}\n" if lead.get("interest") else "")
         + (f"Remarks: {lead['remarks']}\n" if lead.get("remarks") else "")
+        + (f"Free class: {lead['classMode']}\n" if lead.get("classMode") else "")
         + f"Time: {lead.get('time')}"
         + (f"\nOpen chat: {lead['conversationUrl']}" if lead.get("conversationUrl") else "")
     )

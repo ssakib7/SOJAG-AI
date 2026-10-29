@@ -233,6 +233,9 @@ async def capture_lead(sender_id: str, session: dict[str, Any], lead: dict[str, 
             "phone": phone,
             "interest": interest,
             "remarks": remarks,
+            # Free class registrations only; empty for every other lead. The Sheet's
+            # Online/Offline tabs and the 60-seat count filter on it.
+            "classMode": lead.get("classMode", ""),
             "senderId": sender_id,
             "time": datetime.now(timezone.utc).isoformat(),
             "source": "messenger",
