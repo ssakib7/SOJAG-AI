@@ -29,11 +29,10 @@ from app.agents.turn_context import TurnContext
 from app.config import get_settings
 from app.db import state
 from app.kb import config as kb_config
-from app.kb.ad_entries import normalize
+from app.kb.ad_entries import is_ad_message
 from app.kb.defaults import (
     FALLBACK_ATTACHMENT,
     FALLBACK_ESCALATED,
-    FALLBACK_FOLLOWUP,
     FALLBACK_GREETING,
     FALLBACK_LEAD_RETRY,
     FALLBACK_LEAD_THANKS,
@@ -49,6 +48,7 @@ from app.utils.text import (
     claims_payment_verified,
     find_phone,
     find_trx_id,
+    leaks_reasoning,
     looks_like_payment_claim,
     real_name,
     short_note,
@@ -398,6 +398,11 @@ def _no_reply_reason(turn: TurnContext) -> str:
             "AI মডেল সাড়া দেয়নি — গ্রাহক কোনো উত্তর পাননি। অনুগ্রহ করে ইনবক্স থেকে সরাসরি উত্তর "
             f"দিন এবং মডেলের কোটা/বিলিং/API key দেখে নিন। কারিগরি বিবরণ: {error}"
         )
+    if turn.extras.get("leaked"):
+        return (
+            "বটের উত্তরে AI-এর নিজস্ব চিন্তা/নির্দেশনা চলে এসেছিল, তাই তা পাঠানো হয়নি — গ্রাহক "
+            "কোনো উত্তর পাননি। অনুগ্রহ করে ইনবক্স থেকে সরাসরি উত্তর দিন।"
+        )
     return (
         "বট এই বার্তার কোনো উত্তর তৈরি করতে পারেনি — গ্রাহক কোনো উত্তর পাননি। "
         "অনুগ্রহ করে দেখে নিন।"
@@ -425,6 +430,13 @@ async def _model_attempt(sender_id: str, session: dict[str, Any], combined: str,
     )
     try:
         text = await factory.run_turn(turn)
+        if text and leaks_reasoning(text):
+            # Never sent: its deliberation, our rules. Handled exactly like an empty reply
+            # — a tool's fallback if it called one, else a retry, then silence and a page.
+            log.warning("🧠 [%s] reply leaked the model's reasoning — discarded: %s",
+                        sender_id, short_note(text, 400))
+            turn.extras["leaked"] = True
+            text = ""
         turn.extras["text"] = text or _reply_fallback(turn)
         turn.extras["commit"] = True
     except Exception as err:
@@ -462,7 +474,7 @@ async def _run_model_turn(sender_id: str, session: dict[str, Any], combined: str
         if not turn.extras.get("empty_reply"):
             return turn
         if attempt < EMPTY_REPLY_RETRIES:
-            log.warning("⟳ [%s] the model produced no reply — retrying", sender_id)
+            log.warning("⟳ [%s] the model produced no usable reply — retrying", sender_id)
     return turn
 
 
@@ -683,18 +695,23 @@ async def _prompt_for_text(sender_id: str, session: dict[str, Any]) -> None:
 
 
 # Meta's own notices in the thread, not words anyone sent the customer.
-_THREAD_NOTICES = ("replied to an ad", "responding to a user comment")
 PAGE_MESSAGE_MAX_CHARS = 600
 
 
 async def _absorb_page_messages(sender_id: str, session: dict[str, Any]) -> int:
-    """Bring into history what the Page said right before the customer's latest message.
+    """Bring into history the ad question the customer's latest message answers.
 
-    The webhook delivers the customer's "হ্যাঁ" but not the question it answers: an ad's
-    automatic message, a comment private reply, a colleague's reply from the inbox. Those
-    live only in the Facebook thread. This reads the thread and takes the run of Page
-    messages directly before the customer's newest message(s), skipping our own replies
-    and anything already in history. Returns how many it added; 0 on any failure."""
+    The webhook delivers the customer's "হ্যাঁ" but not the ad's automatic question it
+    answers; that lives only in the Facebook thread. This reads the thread, takes the run
+    of Page messages directly before the customer's newest message(s), and keeps ONLY the
+    ones listed in the knowledge base's Ad entry points.
+
+    Only those. Taking every Page message put an old campaign's auto-reply (a Bar Council
+    "share your name and number") in front of a question about the free class, told the
+    model the customer was answering it, and the model argued with itself into the reply
+    the customer got. Staff replies, old automations and our own past replies all look the
+    same from the thread, so anything unlisted stays out. Returns how many it added; 0 on
+    any failure."""
     thread = await graph.fetch_thread_messages(sender_id)
     i = len(thread) - 1
     while i >= 0 and not thread[i]["from_page"]:
@@ -703,23 +720,15 @@ async def _absorb_page_messages(sender_id: str, session: dict[str, Any]) -> int:
     while i >= 0 and thread[i]["from_page"]:
         run.append(thread[i])
         i -= 1
-    if not run:
-        return 0
 
-    ours = {
-        normalize("".join(p.get("text") or "" for p in h.get("parts") or []))
-        for h in session.get("history") or [] if h.get("role") in ("model", "page")
-    } | {normalize(t) for t in (FALLBACK_GREETING, FALLBACK_FOLLOWUP, FALLBACK_LEAD_THANKS)}
     seen = set(session.get("page_mids") or [])
     added = 0
     for m in reversed(run):  # oldest first
         text = m["text"]
-        if (not text or m["id"] in seen or graph.was_sent_by_us(m["id"])
-                or normalize(text) in ours
-                or any(n in text.lower() for n in _THREAD_NOTICES)):
+        if m["id"] in seen or not is_ad_message(text):
             continue
         state.remember_page_message(session, m["id"], text[:PAGE_MESSAGE_MAX_CHARS])
-        log.info("📣 [%s] page message added to context: %s", sender_id, short_note(text))
+        log.info("📣 [%s] ad message added to context: %s", sender_id, short_note(text))
         added += 1
     if added:
         state.mark_session_dirty(sender_id)

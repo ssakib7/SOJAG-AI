@@ -137,6 +137,22 @@ def test_the_question_before_the_customer_reply_enters_history(monkeypatch, ad_k
     assert len(session["history"]) == 1
 
 
+def test_an_unlisted_page_message_stays_out(monkeypatch, ad_kb):
+    """Live 2026-10-29: a Bar Council auto-reply was taken in front of a question about the
+    free class, the model was told the customer was answering it, and its deliberation
+    went out as the reply."""
+    from app.pipeline import turn
+
+    _serve_thread(monkeypatch, _thread(
+        (True, "বার কাউন্সিল ব্যাচ সম্পর্কিত বিস্তারিত জানতে অনুগ্রহ করে আপনার নাম ও মোবাইল "
+               "নম্বর ইনবক্সে শেয়ার করুন। 📞 বিস্তারিত জানতে কল করুন: 09611900530"),
+        (False, "ফ্রি ওরিয়েন্টেশন ক্লাসের জন্য কীভাবে বুক করব?"),
+    ))
+    session = state.get_session("bar-cust")
+    assert asyncio.run(turn._absorb_page_messages("bar-cust", session)) == 0
+    assert session["history"] == []
+
+
 def test_our_own_replies_and_older_page_messages_are_not_absorbed(monkeypatch):
     from app.pipeline import turn
 

@@ -182,6 +182,30 @@ def apologises_for_a_failure(text: object) -> bool:
     return bool(APOLOGY.search(s) and TECH_FAILURE.search(s))
 
 
+# The model thinking out loud INTO the reply. Thinking is held at OpenRouter's "minimal"
+# floor (agents/model.py), and on a turn it finds confusing the model has sent its whole
+# deliberation as the answer — quoting our prompt rules at the customer ("GREETING: If
+# there are ANY earlier messages in the history…", "Wait, look at:"). Words like these
+# never belong in a reply to a customer, in Bangla or in Banglish.
+LEAK_STRONG = re.compile(
+    r"(===|knowledge[\s-]*base|system\s*prompt|the\s+customer|the\s+user\b|save_lead|"
+    r"notify_team|report_payment|end_conversation|CACHE_BREAK|ad\s+entry\s+points?|"
+    r"banglish\s+reply|in\s+the\s+history|earlier\s+messages|answering\s+rules)",
+    re.IGNORECASE,
+)
+LEAK_WEAK = re.compile(
+    r"(\bwait\b|\blet\s+me\b|\bI\s+need\s+to\b|\bI\s+should\b|\bI\s+will\b|\bI'll\b|"
+    r"\bthe\s+rule\b|\bthe\s+prompt\b|\binstructions?\b|\bscenario\b|\bfunnel\b|\bstep\s+\d)",
+    re.IGNORECASE,
+)
+
+
+def leaks_reasoning(text: object) -> bool:
+    """True when a reply carries the model's own deliberation or our prompt's wording."""
+    s = str(text or "")
+    return bool(LEAK_STRONG.search(s)) or len(LEAK_WEAK.findall(s)) >= 2
+
+
 def claims_payment_verified(text: object) -> bool:
     """True when a reply tells the customer their payment has landed, cleared, or been
     accepted. Used only on turns where a receipt was actually seen."""
