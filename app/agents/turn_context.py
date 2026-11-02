@@ -38,7 +38,7 @@ class TurnContext:
     # Scratch: set by tools during the run, read by the pipeline after the send.
     lead: dict[str, Any] | None = None
     payment: dict[str, Any] | None = None
-    lead_invalid: bool = False         # save_lead was called with an unusable phone
+    lead_invalid: bool = False         # the customer tried to send a number and it was unusable
     end_conversation: str | None = None  # off-topic force-stop, with the reason given
     notice: dict[str, Any] | None = None  # notify_team: {category, reason}
 

@@ -19,7 +19,7 @@ def _call_save_lead(**kwargs):
     from app.agents.tools import save_lead
     from app.agents.turn_context import TurnContext, current_turn
 
-    turn = TurnContext(sender_id="fc", session=state.get_session("fc"))
+    turn = TurnContext(sender_id="fc", session=state.get_session("fc"), offered_phone="01712345678")
     token = current_turn.set(turn)
     try:
         result = save_lead(**kwargs)

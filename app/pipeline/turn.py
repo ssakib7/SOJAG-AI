@@ -532,7 +532,7 @@ async def handle_text_batch(sender_id: str, inbox: dict[str, Any]) -> None:
     while True:
         combined = "\n".join([*texts, photos.caption] if photos else texts)
         # A valid BD number anywhere in the burst — recomputed per attempt, a late bubble
-        # may add it. Prefers the number the customer TYPED over the model's copy.
+        # may add it. save_lead only ever accepts this or known_phone, never the model's copy.
         offered_phone = find_phone(combined) if s.leads_on and not session["lead"]["captured"] else None
 
         start = state.now_ms()

@@ -1,9 +1,10 @@
 """Customer-facing tools for the team members: save_lead, report_payment, end_conversation.
 
 Ported semantics from server.js askLLM():
-- save_lead: the number the customer actually TYPED (offered_phone) beats the model's
-  echoed copy (models drop digits), falling back to the number already on file. Name
-  must be >= 2 chars. Invalid phone -> the model is told to re-ask; nothing is saved.
+- save_lead: only a number the customer actually TYPED (offered_phone) or the one already
+  on file is ever saved. The model's copy is never trusted: it drops digits, and it has
+  invented placeholders like 01700000000 for customers who sent no number at all. Name
+  must be >= 2 chars. No usable phone -> the model is told why; nothing is saved.
 - report_payment: every call is audited by a separate verifier model before the team is
   alerted (fail-open when the verifier is unreachable). Overruled reports return a
   rejection the model must act on ("do NOT tell the customer anything reached us").
@@ -21,7 +22,7 @@ import logging
 
 from app.agents.specialists import verify_payment_claim
 from app.agents.turn_context import get_turn
-from app.utils.text import find_trx_id, normalize_phone, short_note
+from app.utils.text import find_trx_id, looks_like_phone_attempt, short_note
 
 log = logging.getLogger(__name__)
 
@@ -39,13 +40,14 @@ def _class_mode(raw: object) -> str:
 def save_lead(name: str, phone: str, interest: str, remarks: str,
               class_mode: str = "") -> dict:
     """Save a customer's contact details so a human representative can follow up. Call this ONLY
-    after the customer has provided BOTH their name and their Bangladeshi mobile number in the
-    conversation. Never invent or guess these values. Also summarise, for the human
-    representative, what this customer wants and how to approach them.
+    after the customer has typed BOTH their name and their Bangladeshi mobile number in the
+    conversation. If they have not typed a number, do NOT call this: never invent, guess or
+    fill in a placeholder. Also summarise, for the human representative, what this customer
+    wants and how to approach them.
 
     Args:
         name: The customer's name, exactly as they gave it.
-        phone: The customer's Bangladeshi mobile number, e.g. 01712345678.
+        phone: The mobile number the customer typed in this conversation.
         interest: One short line (Bengali) on what this customer is interested in — the
             course/batch they asked about and what they actually want, based only on what
             they said in the conversation.
@@ -58,7 +60,9 @@ def save_lead(name: str, phone: str, interest: str, remarks: str,
     """
     turn = get_turn()
     clean_name = str(name or "").strip()
-    resolved_phone = turn.offered_phone or normalize_phone(phone or "") or turn.known_phone
+    # Never the model's `phone` argument. A number typed on an earlier turn is not lost by
+    # this: the pipeline's backstop captured it on that turn, so it is known_phone by now.
+    resolved_phone = turn.offered_phone or turn.known_phone
     valid = len(clean_name) >= 2 and bool(resolved_phone)
     clean_interest = short_note(interest)
     clean_remarks = short_note(remarks)
@@ -68,6 +72,15 @@ def save_lead(name: str, phone: str, interest: str, remarks: str,
         clean_name, resolved_phone or phone or "", "valid" if valid else "REJECTED (bad name/phone)",
         clean_interest, clean_remarks, clean_mode or "-",
     )
+    if not resolved_phone and not looks_like_phone_attempt(turn.combined_text):
+        # Not a bad number but no number. Saying "invalid" here would have the customer who
+        # only tapped an ad told that their details are wrong.
+        return {
+            "status": "no_phone_from_customer",
+            "note": "Nothing was saved: the customer has not typed a mobile number. Do not call save_lead "
+                    "again and do not say their number or details were wrong. Answer their message, and ask "
+                    "for their name and mobile number only where your instructions call for it.",
+        }
     if not valid:
         turn.lead_invalid = True
         return {

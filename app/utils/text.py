@@ -59,6 +59,16 @@ def find_phone(raw: object) -> str | None:
     return digits if re.fullmatch(r"01\d{9}", digits) else None
 
 
+# Seven or more digits in a run: long enough to be a try at a phone number, too long to be
+# "20th BJS", a year or a fee. \d also matches Bengali digits.
+_PHONE_ATTEMPT = re.compile(r"\d(?:[\s\-().+]*\d){6,}")
+
+
+def looks_like_phone_attempt(raw: object) -> bool:
+    """True when the customer seems to have tried to send a number, valid or not."""
+    return bool(_PHONE_ATTEMPT.search(str(raw or "")))
+
+
 # Payment-claim detection: claim-shaped, not topic-shaped. "course fee ki eksathe
 # payment korte hoi" is a QUESTION and must NOT alert the team — only "I have paid /
 # টাকা পাঠিয়েছি / <trx id>" should. Trigger requires BOTH a payment-context word AND a
